@@ -86,10 +86,19 @@ const eventLoop = runEventLoop({
   retryDelayMs: config.retryDelayMs,
 })
 
-// Safety net: a turn quiet for 2 minutes whose session is no longer active is
-// settled from history, so a lost end event never leaves a thread busy.
+// Sessions still executing from before this start are adopted (their end is
+// posted, a pending model retry is reported). Runs after the event stream is
+// started so no end event slips between the check and the subscription.
+setTimeout(() => {
+  opencodeChain = opencodeChain.then(() => bridge.adopt()).catch((error) => logger.warn('adopt failed: ' + (error?.message ?? String(error))))
+}, 1000)
+
+// Safety nets, once a minute: a turn quiet for 2 minutes whose session is no
+// longer active is settled from history (a lost end event never leaves a
+// thread busy), and the stall watchdog reports or gives up silent turns.
 const sweep = setInterval(() => {
   bridge.reconcile({ olderThanMs: 120000 }).catch((error) => logger.warn('sweep failed: ' + (error?.message ?? String(error))))
+  opencodeChain = opencodeChain.then(() => bridge.watchdog()).catch((error) => logger.warn('watchdog failed: ' + (error?.message ?? String(error))))
 }, 60000)
 
 logger.info('running')

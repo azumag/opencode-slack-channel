@@ -32,6 +32,15 @@ const DEFAULTS = {
   mentionUserIds: [],
   replyMention: 'always',
   loopGuard: { maxEvents: 20, windowSeconds: 300, cooldownSeconds: 600 },
+  // The model provider failing (rate limit, endpoint unavailable): opencode
+  // schedules retries, sometimes half an hour out. The thread is told at the
+  // first retry; the turn is given up (interrupted, reported as failed) once
+  // the attempt count reaches maxAttempts or the next try is further away
+  // than maxWaitMs. 0 disables either limit.
+  upstreamRetry: { maxAttempts: 3, maxWaitMs: 5 * 60 * 1000 },
+  // A running turn with no opencode activity at all: tell the thread after
+  // noticeMs, give the turn up after giveUpMs. 0 disables either.
+  stall: { noticeMs: 10 * 60 * 1000, giveUpMs: 30 * 60 * 1000 },
   threadContextMessages: 30,
   channelContextMessages: 10,
   replyMode: 'last',
@@ -71,6 +80,8 @@ export function resolveConfig(raw = {}) {
     slack: { ...DEFAULTS.slack, ...(raw.slack ?? {}) },
     opencode: { ...DEFAULTS.opencode, ...(raw.opencode ?? {}) },
     loopGuard: { ...DEFAULTS.loopGuard, ...(raw.loopGuard ?? {}) },
+    upstreamRetry: { ...DEFAULTS.upstreamRetry, ...(raw.upstreamRetry ?? {}) },
+    stall: { ...DEFAULTS.stall, ...(raw.stall ?? {}) },
     reactions: { ...DEFAULTS.reactions, ...(raw.reactions ?? {}) },
   }
   config.slack.tokensFile = expand(config.slack.tokensFile)
@@ -94,6 +105,9 @@ export function resolveConfig(raw = {}) {
   if (config.model !== undefined && (typeof config.model?.providerID !== 'string' || typeof config.model?.id !== 'string')) fail('model must be { "providerID": "…", "id": "…" }')
   for (const key of ['maxEvents', 'windowSeconds', 'cooldownSeconds']) {
     if (!Number.isFinite(config.loopGuard[key]) || config.loopGuard[key] < 0) fail('loopGuard.' + key + ' must be a non-negative number')
+  }
+  for (const [group, key] of [['upstreamRetry', 'maxAttempts'], ['upstreamRetry', 'maxWaitMs'], ['stall', 'noticeMs'], ['stall', 'giveUpMs']]) {
+    if (!Number.isFinite(config[group][key]) || config[group][key] < 0) fail(group + '.' + key + ' must be a non-negative number')
   }
   for (const key of ['threadContextMessages', 'channelContextMessages', 'maxReplyChars', 'interactiveTimeoutMs', 'retryDelayMs']) {
     if (!Number.isFinite(config[key]) || config[key] < 0) fail(key + ' must be a non-negative number')

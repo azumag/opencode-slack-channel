@@ -552,3 +552,187 @@ test('bridge: long replies are split and only the first chunk mentions the sende
     await sleep(0)
   })
 })
+
+// ── upstream retries, stalls, adoption ──────────────────────────────────────
+
+const unavailable = { type: 'provider.rate-limit', status: 429, message: 'Upstream request failed: Endpoint is unavailable.' }
+
+test('bridge: a scheduled model retry is told once in the thread, rewritten on the next attempt, and marked recovered', async () => {
+  await withBridge({ upstreamRetry: { maxAttempts: 5, maxWaitMs: 10 * 60 * 1000 } }, async ({ bridge, slack }) => {
+    const root = msg({ text: '<@UBOT> x' })
+    await bridge.handleEvent(root)
+    await emit(bridge, [{ type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 2, at: 1_000_000 + 60_000, error: unavailable } }])
+    const notice = slack.posts.at(-1)
+    equal(notice.threadTs, root.ts)
+    assert(notice.text.startsWith('<@UHUMAN> :warning: The model call failed'), notice.text)
+    assert(notice.text.includes('`provider.rate-limit 429`: Upstream request failed: Endpoint is unavailable.'), notice.text)
+    assert(notice.text.includes('Attempt 2;') && notice.text.includes('(in 1 min)'), notice.text)
+    assert(!notice.text.includes('Switched to'), 'no model switch, no switch line')
+    const posts = slack.posts.length
+    await emit(bridge, [{ type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 3, at: 1_000_000 + 120_000, error: unavailable } }])
+    equal(slack.posts.length, posts, 'no second notice')
+    equal(slack.updates.at(-1).ts, notice.ts)
+    assert(slack.updates.at(-1).text.includes('Attempt 3;'))
+    await emit(bridge, done('ses_0001', 'finally'))
+    equal(slack.posts.at(-1).text, '<@UHUMAN> finally')
+    assert(slack.updates.some((u) => u.ts === notice.ts && u.text.includes('went through after 2 retries.')))
+  })
+})
+
+test('bridge: a retry too far away gives the turn up and reports it as failed', async () => {
+  await withBridge({}, async ({ bridge, slack, opencode }) => {
+    const root = msg({ text: '<@UBOT> x' })
+    await bridge.handleEvent(root)
+    await emit(bridge, [{ type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 2, at: 1_000_000 + 32 * 60_000, error: unavailable } }])
+    equal(opencode.interrupts, ['ses_0001'])
+    await emit(bridge, [{ type: 'session.execution.interrupted', data: { sessionID: 'ses_0001', reason: 'user' } }])
+    const reply = slack.posts.at(-1)
+    equal(reply.threadTs, root.ts)
+    assert(reply.text.startsWith('<@UHUMAN> Turn failed: the model provider kept failing — provider.rate-limit 429'), reply.text)
+    assert(reply.text.includes('gave up because the next retry was 32 min away'), reply.text)
+    assert(slack.reactions.some((r) => r.op === 'add' && r.name === 'x'), 'failed reaction')
+    await bridge.handleEvent(msg({ thread_ts: root.ts, text: '<@UBOT> again' }))
+    equal(opencode.prompts.length, 2, 'thread released')
+  })
+})
+
+test('bridge: reaching maxAttempts gives up and retires the retry notice', async () => {
+  await withBridge({ upstreamRetry: { maxAttempts: 3, maxWaitMs: 0 } }, async ({ bridge, slack, opencode }) => {
+    await bridge.handleEvent(msg({ text: '<@UBOT> x' }))
+    await emit(bridge, [{ type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 2, at: 1_000_000 + 90 * 60_000, error: unavailable } }])
+    const notice = slack.posts.at(-1)
+    equal(opencode.interrupts.length, 0, 'maxWaitMs 0 never gives up on the wait alone')
+    await emit(bridge, [{ type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 3, at: 1_000_000 + 60_000, error: unavailable } }])
+    equal(opencode.interrupts, ['ses_0001'])
+    assert(slack.updates.some((u) => u.ts === notice.ts && u.text.includes('Gave up waiting for the model provider (after 2 failed attempts).')))
+  })
+})
+
+const GLM = { providerID: 'opencode', id: 'glm-5.3-flash-free' }
+const DEEPSEEK = { providerID: 'opencode', id: 'deepseek-v4.1-flash-free' }
+
+test('bridge: a model switch right before a retry is reported as a fallback, and the recovery names the model', async () => {
+  await withBridge({ upstreamRetry: { maxAttempts: 5, maxWaitMs: 10 * 60 * 1000 } }, async ({ bridge, slack }) => {
+    const root = msg({ text: '<@UBOT> x' })
+    await bridge.handleEvent(root)
+    await emit(bridge, [
+      // the session put back on its own model as the turn starts: not a fallback
+      { type: 'session.model.selected', data: { sessionID: 'ses_0001', model: GLM, previous: DEEPSEEK } },
+      { type: 'session.execution.started', data: { sessionID: 'ses_0001' } },
+      // the order opencode 2.0.31 publishes: switch, the failed step's start, retry
+      { type: 'session.model.selected', data: { sessionID: 'ses_0001', model: DEEPSEEK, previous: GLM } },
+      { type: 'session.step.started', data: { sessionID: 'ses_0001', agent: 'build', model: { ...GLM, variant: 'default' } } },
+      { type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 2, at: 1_000_000 + 1_000, error: unavailable } },
+    ])
+    const notice = slack.posts.at(-1)
+    assert(notice.text.startsWith('<@UHUMAN> :warning: The model call to `opencode/glm-5.3-flash-free` failed — `provider.rate-limit 429`'), notice.text)
+    assert(notice.text.includes('Switched to `opencode/deepseek-v4.1-flash-free`. Attempt 2;') && notice.text.includes('(in 1 s)'), notice.text)
+    await emit(bridge, done('ses_0001', 'PONG'))
+    equal(slack.posts.at(-1).text, '<@UHUMAN> PONG')
+    assert(slack.updates.some((u) => u.ts === notice.ts && u.text.includes('went through after 1 retry, on `opencode/deepseek-v4.1-flash-free`.')))
+  })
+})
+
+test('bridge: a switch that is not followed straight by the retry is not a fallback', async () => {
+  await withBridge({ upstreamRetry: { maxAttempts: 5, maxWaitMs: 10 * 60 * 1000 } }, async ({ bridge, slack }) => {
+    await bridge.handleEvent(msg({ text: '<@UBOT> x' }))
+    await emit(bridge, [
+      { type: 'session.model.selected', data: { sessionID: 'ses_0001', model: GLM, previous: DEEPSEEK } },
+      { type: 'session.execution.started', data: { sessionID: 'ses_0001' } },
+      { type: 'session.step.started', data: { sessionID: 'ses_0001', agent: 'build', model: GLM } },
+      { type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 2, at: 1_000_000 + 60_000, error: unavailable } },
+    ])
+    const notice = slack.posts.at(-1)
+    assert(notice.text.includes(':warning: The model call failed and opencode is waiting to retry'), notice.text)
+    assert(!notice.text.includes('Switched to'), notice.text)
+  })
+})
+
+test('bridge: giving up after fallbacks lists the models that failed', async () => {
+  await withBridge({ upstreamRetry: { maxAttempts: 3, maxWaitMs: 10 * 60 * 1000 } }, async ({ bridge, slack, opencode }) => {
+    const root = msg({ text: '<@UBOT> x' })
+    await bridge.handleEvent(root)
+    await emit(bridge, [
+      { type: 'session.model.selected', data: { sessionID: 'ses_0001', model: DEEPSEEK, previous: GLM } },
+      { type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 2, at: 1_000_000 + 1_000, error: unavailable } },
+    ])
+    const notice = slack.posts.at(-1)
+    await emit(bridge, [
+      { type: 'session.model.selected', data: { sessionID: 'ses_0001', model: GLM, previous: DEEPSEEK } },
+      { type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 3, at: 1_000_000 + 60_000, error: unavailable } },
+    ])
+    equal(opencode.interrupts, ['ses_0001'])
+    assert(slack.updates.some((u) => u.ts === notice.ts && u.text.includes('Gave up waiting for the model provider (after 2 failed attempts; tried opencode/glm-5.3-flash-free, opencode/deepseek-v4.1-flash-free).')), JSON.stringify(slack.updates.at(-1)))
+    await emit(bridge, [{ type: 'session.execution.interrupted', data: { sessionID: 'ses_0001', reason: 'user' } }])
+    const reply = slack.posts.at(-1)
+    equal(reply.threadTs, root.ts)
+    assert(reply.text.includes('gave up after 2 failed attempts (tried opencode/glm-5.3-flash-free, opencode/deepseek-v4.1-flash-free). Try again later or switch the model.'), reply.text)
+  })
+})
+
+test('bridge: !stop during a retry wait is an ordinary stop', async () => {
+  await withBridge({ upstreamRetry: { maxAttempts: 5, maxWaitMs: 0 } }, async ({ bridge, slack }) => {
+    const root = msg({ text: '<@UBOT> x' })
+    await bridge.handleEvent(root)
+    await emit(bridge, [{ type: 'session.retry.scheduled', data: { sessionID: 'ses_0001', attempt: 1, at: 1_000_000 + 60_000, error: unavailable } }])
+    await bridge.handleEvent(msg({ thread_ts: root.ts, text: '!stop' }))
+    await emit(bridge, [{ type: 'session.execution.interrupted', data: { sessionID: 'ses_0001', reason: 'user' } }])
+    equal(slack.posts.at(-1).text, 'Stopped.')
+  })
+})
+
+test('bridge: the stall watchdog tells the thread once, then gives the turn up', async () => {
+  await withBridge({ stall: { noticeMs: 10 * 60_000, giveUpMs: 30 * 60_000 } }, async ({ bridge, slack, opencode, advance }) => {
+    const root = msg({ text: '<@UBOT> long' })
+    await bridge.handleEvent(root)
+    advance(5 * 60_000)
+    await bridge.watchdog()
+    const before = slack.posts.length
+    advance(6 * 60_000)
+    await bridge.watchdog()
+    await bridge.watchdog()
+    equal(slack.posts.length, before + 1, 'one notice')
+    assert(slack.posts.at(-1).text.startsWith('<@UHUMAN> :hourglass_flowing_sand: No progress from opencode for 11 min'), slack.posts.at(-1).text)
+    await emit(bridge, [{ type: 'session.tool.called', data: { sessionID: 'ses_0001' } }])
+    advance(29 * 60_000)
+    await bridge.watchdog()
+    equal(opencode.interrupts.length, 0, 'activity reset the clock')
+    advance(2 * 60_000)
+    await bridge.watchdog()
+    equal(opencode.interrupts, ['ses_0001'])
+    await emit(bridge, [{ type: 'session.execution.interrupted', data: { sessionID: 'ses_0001', reason: 'user' } }])
+    assert(slack.posts.at(-1).text.includes('Turn failed: no progress from opencode for 31 min'), slack.posts.at(-1).text)
+  })
+})
+
+test('bridge: after a restart, running sessions are adopted — their end is posted, a far retry is given up', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ocs-adopt-'))
+  try {
+    const config = resolveConfig({ allowedChannelIds: ['C1'], allowedUserIds: ['UHUMAN'], cwd: '/work', stateFile: join(dir, 'state.json') })
+    const slack = fakeSlack()
+    const opencode = fakeOpencode()
+    const first = createBridge({ config, slack, opencode, logger: recordingLogger(), now: () => 1_000_000 })
+    await first.identify()
+    const a = msg({ text: '<@UBOT> a' })
+    const b = msg({ text: '<@UBOT> b' })
+    await first.handleEvent(a)
+    await first.handleEvent(b)
+
+    // restart while both run: ses_0001 is just busy, ses_0002 waits on a 32-min retry
+    opencode.active = new Set(['ses_0001', 'ses_0002'])
+    opencode.history.set('ses_0002', [{ type: 'assistant', retry: { attempt: 2, at: 1_000_000 + 32 * 60_000, error: unavailable } }])
+    const second = createBridge({ config, slack, opencode, logger: recordingLogger(), now: () => 1_000_000 })
+    await second.identify()
+    equal(await second.adopt(), 2)
+    equal(opencode.interrupts, ['ses_0002'])
+    await emit(second, [{ type: 'session.execution.interrupted', data: { sessionID: 'ses_0002', reason: 'user' } }])
+    const failed = slack.posts.at(-1)
+    equal(failed.threadTs, b.ts)
+    assert(failed.text.startsWith('<@UHUMAN> Turn failed: the model provider kept failing'), 'requester remembered across the restart: ' + failed.text)
+    await emit(second, done('ses_0001', 'a done'))
+    equal(slack.posts.at(-1), { ...slack.posts.at(-1), threadTs: a.ts, text: '<@UHUMAN> a done' })
+    equal(await second.adopt(), 0, 'nothing left to adopt')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

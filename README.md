@@ -13,6 +13,8 @@ opencode v2 サーバー（`opencode2 serve --service`）を Slack から使う�
 - opencode には `[名前 | Slack user <@U…>] 本文` の形で送る。スレッド途中で初めて呼ばれたときは過去の発言を、2 回目以降は前回以降の差分を文脈として付ける。
 - セッション作成時に、Slack 用の指示（名乗り・送信者の扱い・整形・簡潔さ・できないこと）を instructions として注入する。
 - 実行中に届いた投稿はキューに積み、ターンが終わると順に送る。
+- モデル提供元の失敗で再試行待ちになったり、何も進まなくなったりしたら、スレッドに知らせ、限度を超えたら中断して失敗として返す（`upstreamRetry` / `stall`）。黙ったまま待ち続けない。再試行の直前にモデルが切り替わった（フォールバック。opencode 側の rate-limit-fallback プラグインなど）ときは、失敗したモデルと切り替え先も書き、中断時には失敗したモデルを並べる。
+- 再起動しても、実行中だったセッションを引き継ぎ、終わったら返信する（依頼者へのメンションは付かない）。
 - 許可（`permission.asked`）と質問（`form.created`）は、スレッドにボタン付きで出す。期限（既定 30 分）を過ぎると、許可は拒否・質問は取り消しになる。
 - 許可リスト:
   - `allowedChannelIds` / `allowedUserIds` は**既定で拒否**（`allowedUserIds` を空にすると誰も使えない。全員に開放するなら `"*"`）。
@@ -63,6 +65,8 @@ opencode サーバーの URL とパスワードは、v2 サービスが書く `~
 | `mentionUserIds` | `[]` | エージェントが本文に書いた `<@U…>` を実メンションにしてよい ID |
 | `replyMention` | `always` | 返信の先頭で送信者をメンションするか（`always` / `humans` / `off`。DM では付けない） |
 | `loopGuard` | 20 件 / 300 秒 → 600 秒 | bot 投稿の上限 |
+| `upstreamRetry` | `{ maxAttempts: 3, maxWaitMs: 300000 }` | モデル提供元の失敗（レート制限・endpoint unavailable など）で opencode が再試行を予約したら、スレッドに ⚠️ で知らせる（依頼者へのメンション付き。2回目以降は同じメッセージを書き換え）。次の試行の番号が `maxAttempts` に達するか（opencode は最初の再試行を 2 と数えるので、既定の 3 は「2 回失敗したら」）、次の試行まで `maxWaitMs` を超えるなら、ターンを中断して失敗として返す。0 でその条件を無効化 |
+| `stall` | `{ noticeMs: 600000, giveUpMs: 1800000 }` | 実行中なのに opencode から何のイベントもない時間。`noticeMs` で知らせ、`giveUpMs` で中断して失敗として返す。0 で無効化 |
 | `threadContextMessages` / `channelContextMessages` | 30 / 10 | 文脈として付ける件数 |
 | `replyMode` | `last` | `last` は最後のテキストだけ、`all` はターン中の全テキスト |
 | `maxReplyChars` | 4000 | 返信を分割する長さ |

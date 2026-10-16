@@ -12,7 +12,7 @@
 // on dsh-slack-channel's structure (queueing, commands, prompts with buttons),
 // with channel AND user allowlists, a bot allowlist, and a bot loop guard.
 
-import { toSlackMrkdwn } from './format.js'
+import { escape, toSlackMrkdwn } from './format.js'
 import { createLoopGuard } from './guard.js'
 import { createInteractions } from './interactions.js'
 import { buildInstructions, composePrompt, contextBlock, senderLabel, stripSelfMention } from './prompt.js'
@@ -190,7 +190,22 @@ export function createBridge({ config, slack, opencode, logger, now = () => Date
   // ── sessions ─────────────────────────────────────────────────────────────
 
   function makeRecord(sessionId, key, channel, threadTs, isDm, fresh) {
-    const record = { sessionId, key, channel, threadTs, isDm, fresh, busy: false, texts: [], queue: [], triggerTs: undefined, mentionTarget: undefined, startedAt: 0 }
+    const record = {
+      sessionId, key, channel, threadTs, isDm, fresh, busy: false, texts: [], queue: [], triggerTs: undefined, mentionTarget: undefined, startedAt: 0,
+      /** Last opencode event for this session while busy (stall watchdog). */
+      lastActivityAt: 0,
+      stallNoticed: false,
+      /** The thread notice about a scheduled model retry: { ts, attempts }. */
+      retryNotice: undefined,
+      /** A model switch not yet followed by anything but its retry: { from, to }. */
+      pendingSwitch: undefined,
+      /** Models whose calls failed this turn, in order (from fallback switches). */
+      failedModels: [],
+      /** The model the turn switched to for its retries, if it did. */
+      retryModel: undefined,
+      /** Set when the bridge gives a turn up; its interrupt then settles as failed. */
+      abort: undefined,
+    }
     records.set(sessionId, record)
     recordsByKey.set(key, record)
     return record
@@ -307,7 +322,15 @@ export function createBridge({ config, slack, opencode, logger, now = () => Date
     record.texts = []
     record.triggerTs = item.ts
     record.mentionTarget = item.mentionTarget
+    store.setRequester(record.key, item.mentionTarget)
     record.startedAt = now()
+    record.lastActivityAt = record.startedAt
+    record.stallNoticed = false
+    record.retryNotice = undefined
+    record.pendingSwitch = undefined
+    record.failedModels = []
+    record.retryModel = undefined
+    record.abort = undefined
     try {
       await opencode.prompt(record.sessionId, item.text)
     } catch (error) {
@@ -323,6 +346,21 @@ export function createBridge({ config, slack, opencode, logger, now = () => Date
   /** One turn ended: post the reply, swap the reaction, release the thread. */
   async function settle(record, outcome, info) {
     if (!record.busy) return
+    if (record.abort !== undefined) {
+      outcome = 'failed'
+      info = { message: record.abort.message }
+    }
+    if (record.retryNotice !== undefined && outcome === 'done') {
+      // opencode numbers the upcoming try: the first retry is attempt 2.
+      const retries = Math.max(1, record.retryNotice.attempts - 1)
+      const on = record.retryModel !== undefined ? ', on `' + escape(modelName(record.retryModel)) + '`' : ''
+      void rewriteNotice(record, record.retryNotice.ts, ':white_check_mark: The model call went through after ' + retries + ' retr' + (retries === 1 ? 'y' : 'ies') + on + '.')
+    }
+    record.abort = undefined
+    record.retryNotice = undefined
+    record.pendingSwitch = undefined
+    record.failedModels = []
+    record.retryModel = undefined
     const reply = config.replyMode === 'last' ? record.texts.at(-1) : record.texts.join('\n\n')
     let text
     if (outcome === 'done') {
@@ -342,6 +380,139 @@ export function createBridge({ config, slack, opencode, logger, now = () => Date
     await sendReply(record, text, outcome === 'done' || outcome === 'failed' ? mentionTarget : undefined)
     swapReaction(record, triggerTs, outcome === 'done' ? 'done' : outcome === 'failed' ? 'failed' : 'stopped')
     await drain(record)
+  }
+
+  /** "provider/model" for notices. */
+  function modelName(model) {
+    return model.providerID + '/' + model.id + (model.variant && model.variant !== 'default' ? ' (' + model.variant + ')' : '')
+  }
+
+  /** Local wall-clock time for notices (the bridge host's zone). */
+  function clock(ms) {
+    return new Date(ms).toLocaleTimeString('en-GB', { hour12: false })
+  }
+
+  /** Post an already-formatted mrkdwn notice in the turn's thread, mentioning its requester. */
+  async function turnNotice(record, mrkdwn) {
+    const prefix = record.mentionTarget !== undefined ? '<@' + record.mentionTarget + '> ' : ''
+    return post(record.channel, record.threadTs, prefix + mrkdwn)
+  }
+
+  async function rewriteNotice(record, ts, mrkdwn) {
+    try {
+      await slack.updateMessage(record.channel, ts, mrkdwn)
+    } catch (error) {
+      logger.warn('notice update failed: ' + errorText(error))
+    }
+  }
+
+  /**
+   * Give a running turn up: interrupt the session; the interrupted event then
+   * settles the turn as failed with this message, so the thread (and any
+   * agent waiting on it) hears why. A failed or no-op interrupt settles now.
+   */
+  async function giveUp(record, message) {
+    if (!record.busy || record.abort !== undefined) return
+    record.abort = { message }
+    logger.warn('giving up ' + record.sessionId + ': ' + message)
+    try {
+      const result = await opencode.interrupt(record.sessionId)
+      if (result?.interrupted === false) await settle(record, 'failed')
+    } catch (error) {
+      record.abort = { message: message + ' (interrupt failed: ' + errorText(error) + ')' }
+      await settle(record, 'failed')
+    }
+  }
+
+  /**
+   * opencode scheduled a model retry (rate limit, endpoint unavailable, …).
+   * The thread is told — one notice per turn, rewritten on later attempts —
+   * and the turn is given up once the attempts or the wait exceed the limits.
+   */
+  async function onRetry(record, { attempt, at, error }) {
+    if (!record.busy || record.abort !== undefined) return
+    // A switch published right before this retry is a fallback (for example
+    // by the rate-limit-fallback plugin): the old model failed, the new one is tried next.
+    const fallback = record.pendingSwitch
+    record.pendingSwitch = undefined
+    if (fallback !== undefined) {
+      if (fallback.from !== undefined && !record.failedModels.some((m) => modelName(m) === modelName(fallback.from))) record.failedModels.push(fallback.from)
+      record.retryModel = fallback.to
+    }
+    const tried = record.failedModels.length > 0 ? ' (tried ' + record.failedModels.map(modelName).join(', ') + ')' : ''
+    const kind = (error?.type ?? 'error') + (error?.status ? ' ' + error.status : '')
+    const reason = '`' + escape(kind) + '`: ' + escape(String(error?.message ?? 'unknown').slice(0, 300))
+    const waitMs = Math.max(0, (at ?? now()) - now())
+    const waitText = waitMs < 60000 ? Math.ceil(waitMs / 1000) + ' s' : Math.round(waitMs / 60000) + ' min'
+    const limits = config.upstreamRetry
+    const tooMany = limits.maxAttempts > 0 && attempt >= limits.maxAttempts
+    const tooLong = limits.maxWaitMs > 0 && waitMs > limits.maxWaitMs
+    if (tooMany || tooLong) {
+      const failures = Math.max(1, attempt - 1)
+      const why = tooMany ? 'after ' + failures + ' failed attempt' + (failures === 1 ? '' : 's') : 'because the next retry was ' + waitText + ' away'
+      const triedNote = record.failedModels.length > 0 ? '; tried ' + record.failedModels.map(modelName).join(', ') : ''
+      if (record.retryNotice !== undefined) void rewriteNotice(record, record.retryNotice.ts, ':x: Gave up waiting for the model provider (' + why + escape(triedNote) + ').')
+      record.retryNotice = undefined
+      await giveUp(record, 'the model provider kept failing — ' + kind + ': ' + String(error?.message ?? 'unknown').slice(0, 300) + ' — gave up ' + why + tried + '. Try again later or switch the model.')
+      return
+    }
+    const text = fallback !== undefined && fallback.from !== undefined
+      ? ':warning: The model call to `' + escape(modelName(fallback.from)) + '` failed — ' + reason + '\nSwitched to `' + escape(modelName(fallback.to)) + '`. Attempt ' + attempt + '; next try at ' + clock(at ?? now()) + ' (in ' + waitText + '). `!stop` gives up now.'
+      : ':warning: The model call failed and opencode is waiting to retry — ' + reason + '\nAttempt ' + attempt + '; next try at ' + clock(at ?? now()) + ' (in ' + waitText + '). `!stop` gives up now.'
+    if (record.retryNotice === undefined) {
+      const posted = await turnNotice(record, text)
+      if (posted !== undefined) record.retryNotice = { ts: posted.ts, attempts: attempt }
+    } else {
+      record.retryNotice.attempts = attempt
+      await rewriteNotice(record, record.retryNotice.ts, text)
+    }
+  }
+
+  /**
+   * Stall watchdog (called periodically): a busy turn with no opencode
+   * activity is reported after stall.noticeMs and given up after stall.giveUpMs.
+   */
+  async function watchdog() {
+    for (const record of [...records.values()]) {
+      if (!record.busy || record.abort !== undefined) continue
+      const quietMs = now() - (record.lastActivityAt || record.startedAt)
+      const minutes = Math.round(quietMs / 60000)
+      if (config.stall.giveUpMs > 0 && quietMs >= config.stall.giveUpMs) {
+        await giveUp(record, 'no progress from opencode for ' + minutes + ' min — the turn was interrupted.')
+      } else if (config.stall.noticeMs > 0 && quietMs >= config.stall.noticeMs && !record.stallNoticed) {
+        record.stallNoticed = true
+        await turnNotice(record, ':hourglass_flowing_sand: No progress from opencode for ' + minutes + ' min (last activity ' + clock(record.lastActivityAt || record.startedAt) + '). Still waiting; `!stop` gives up.')
+      }
+    }
+  }
+
+  /**
+   * After a restart: sessions of bound threads that are still executing are
+   * adopted as busy, so their end is posted (mentioning the requester the
+   * state file remembered) and a pending model retry is handled right away.
+   */
+  async function adopt() {
+    const active = await opencode.activeSessionIds()
+    let adopted = 0
+    for (const [key, entry] of store.entries()) {
+      if (!active.has(entry.sessionId) || records.has(entry.sessionId)) continue
+      const sep = key.indexOf(':')
+      const channel = key.slice(0, sep)
+      const record = makeRecord(entry.sessionId, key, channel, key.slice(sep + 1), channel.startsWith('D'), false)
+      record.busy = true
+      record.mentionTarget = entry.requester
+      record.startedAt = now()
+      record.lastActivityAt = record.startedAt
+      adopted++
+      try {
+        const latest = (await opencode.messages(entry.sessionId))[0]
+        if (latest?.type === 'assistant' && latest.retry !== undefined) await onRetry(record, latest.retry)
+      } catch (error) {
+        logger.warn('adopt: history of ' + entry.sessionId + ' unavailable: ' + errorText(error))
+      }
+    }
+    if (adopted > 0) logger.info('adopted ' + adopted + ' running session(s) after start')
+    return adopted
   }
 
   /**
@@ -372,7 +543,28 @@ export function createBridge({ config, slack, opencode, logger, now = () => Date
 
   async function handleOpencodeEvent(event) {
     const data = event?.data
+    const active = typeof event?.type === 'string' && event.type.startsWith('session.') ? records.get(data?.sessionID) : undefined
+    if (active?.busy) {
+      active.lastActivityAt = now()
+      active.stallNoticed = false
+      // Only a switch that the retry follows immediately is a fallback; a
+      // switch at the start of a turn (a model restored) is not. opencode
+      // publishes the failed step's start between the switch and the retry.
+      const failedStep = event.type === 'session.step.started' && active.pendingSwitch?.from !== undefined
+        && data?.model?.providerID === active.pendingSwitch.from.providerID && data?.model?.id === active.pendingSwitch.from.id
+      if (event.type !== 'session.model.selected' && event.type !== 'session.retry.scheduled' && !failedStep) active.pendingSwitch = undefined
+    }
     switch (event?.type) {
+      case 'session.model.selected': {
+        const record = records.get(data?.sessionID)
+        if (record?.busy && data.model !== undefined) record.pendingSwitch = { from: data.previous, to: data.model }
+        return
+      }
+      case 'session.retry.scheduled': {
+        const record = records.get(data?.sessionID)
+        if (record?.busy) await onRetry(record, data)
+        return
+      }
       case 'session.text.ended': {
         const record = records.get(data?.sessionID)
         if (record?.busy && typeof data.text === 'string') record.texts.push(data.text)
@@ -582,6 +774,8 @@ export function createBridge({ config, slack, opencode, logger, now = () => Date
     handleOpencodeEvent,
     handleInteractive: (payload) => interactions.handleAction(payload),
     reconcile,
+    watchdog,
+    adopt,
     dispose: () => interactions.disposeAll(),
     // for tests
     _records: records,

@@ -51,11 +51,24 @@ export function createStore(stateFile, { logger } = {}) {
       entry.updatedAt = new Date().toISOString()
       save()
     },
+    /**
+     * Remember who the running turn answers to, so a restarted bridge that
+     * adopts the session can still mention them when it reports the outcome.
+     */
+    setRequester(key, userId) {
+      const entry = state.threads[key]
+      if (entry === undefined || entry.requester === userId) return
+      if (userId === undefined) delete entry.requester
+      else entry.requester = userId
+      save()
+    },
     /** key for a session id, or undefined. */
     keyOf(sessionId) {
       for (const [key, entry] of Object.entries(state.threads)) if (entry.sessionId === sessionId) return key
       return undefined
     },
+    /** [key, entry] pairs of every bound thread. */
+    entries: () => Object.entries(state.threads),
     size: () => Object.keys(state.threads).length,
   }
 }

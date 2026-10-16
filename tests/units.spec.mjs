@@ -261,3 +261,13 @@ test('slack: read methods are sent form-encoded, writes as JSON', async () => {
   assert(!new URLSearchParams(byMethod['conversations.replies'].body).has('oldest'), 'undefined params are omitted')
   equal(byMethod['chat.postMessage'].type, 'application/json; charset=utf-8', 'writes stay JSON (blocks)')
 })
+
+test('config: retry and stall limits default and validate', () => {
+  const config = resolveConfig({})
+  equal(config.upstreamRetry, { maxAttempts: 3, maxWaitMs: 300000 })
+  equal(config.stall, { noticeMs: 600000, giveUpMs: 1800000 })
+  equal(resolveConfig({ upstreamRetry: { maxWaitMs: 0 } }).upstreamRetry, { maxAttempts: 3, maxWaitMs: 0 })
+  let threw = false
+  try { resolveConfig({ stall: { noticeMs: -1 } }) } catch { threw = true }
+  assert(threw, 'negative stall rejected')
+})
