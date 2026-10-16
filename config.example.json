@@ -1,0 +1,18 @@
+{
+  "model": { "providerID": "opencode-go", "id": "deepseek-v4.1-flash" },
+  "cwd": "~/work",
+  "channelCwd": {},
+  "allowedChannelIds": [],
+  "allowDirectMessages": true,
+  "allowedUserIds": ["UXXXXXXXXXX"],
+  "allowedBotIds": ["U0C7AN52QGN", "U0C6HEG8KC6", "U0C9C7BNVB5"],
+  "mentionUserIds": ["U0C7AN52QGN", "U0C6HEG8KC6", "U0C9C7BNVB5"],
+  "replyMention": "always",
+  "permissions": [{ "action": "shell", "resource": "*", "effect": "ask" }],
+  "loopGuard": { "maxEvents": 20, "windowSeconds": 300, "cooldownSeconds": 600 },
+  "threadContextMessages": 30,
+  "channelContextMessages": 10,
+  "replyMode": "last",
+  "maxReplyChars": 4000,
+  "interactiveTimeoutMs": 1800000
+}

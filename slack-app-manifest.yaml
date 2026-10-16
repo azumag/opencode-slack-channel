@@ -1,0 +1,38 @@
+# Slack app manifest for opencode-slack-channel.
+# api.slack.com/apps → Create New App → From a manifest → pick the workspace →
+# paste this → Create. Then: Basic Information → App-Level Tokens → Generate
+# (scope connections:write) = xapp- token; Install App → Install to Workspace
+# = xoxb- token. Store both with ./set-tokens.sh.
+display_information:
+  name: opencode
+  description: opencode v2 agent — one session per Slack thread
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: opencode
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - chat:write          # post replies and prompts
+      - channels:history    # message.channels + thread/channel context backfill
+      - groups:history      # private channels
+      - im:history          # DMs
+      - reactions:write     # 👀 / ✅ / ❌ status reactions
+      - reactions:read
+      - users:read          # sender display names in the prompt
+settings:
+  event_subscriptions:
+    bot_events:
+      # Do NOT add app_mention: message.* already delivers mentions.
+      - message.channels
+      - message.groups
+      - message.im
+  interactivity:
+    is_enabled: true        # permission / question buttons (no URL with Socket Mode)
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
