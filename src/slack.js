@@ -43,21 +43,27 @@ export class SlackClient {
    * @param token - the bearer token: bot (xoxb-…) for most calls,
    *   app-level (xapp-…) for apps.connections.open.
    * @param payload - JSON-serializable arguments.
-   * @param options - optional abort signal.
+   * @param options - optional abort signal; `form: true` sends the arguments
+   *   form-encoded. Read methods need it: conversations.replies answers a
+   *   JSON body with invalid_arguments and users.info with user_not_found
+   *   (measured 2026-10-17), while write methods take JSON (blocks).
    * @returns the response body without `ok`.
    * @throws SlackApiError on !ok bodies, HTTP errors, or transport failures.
    */
   async call(method, token, payload = {}, options = {}) {
     const url = this.#apiBase + '/' + method
+    const form = options.form === true
     let res
     try {
       res = await this.#fetchImpl(url, {
         method: 'POST',
         headers: {
-          'content-type': 'application/json; charset=utf-8',
+          'content-type': form ? 'application/x-www-form-urlencoded' : 'application/json; charset=utf-8',
           authorization: 'Bearer ' + token,
         },
-        body: JSON.stringify(payload),
+        body: form
+          ? new URLSearchParams(Object.entries(payload).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])).toString()
+          : JSON.stringify(payload),
         signal: options.signal ?? AbortSignal.timeout(this.#timeoutMs),
       })
     } catch (error) {
@@ -160,25 +166,43 @@ export class SlackClient {
    * Messages of one thread, oldest first (the root included). `oldest` is
    * exclusive here: Slack treats it inclusively, so the message AT that ts is
    * filtered out — the caller passes the last ts it already handed over.
+   * Slack pages oldest first, so a long thread is walked along
+   * `response_metadata.next_cursor` (at most `maxPages` pages) to reach its
+   * newest messages; `latest` (the trigger's ts) stops the walk there. Slack
+   * repeats the root on every page; it is kept once.
    */
-  async replies(channelId, threadTs, { oldest, limit = 200, signal } = {}) {
-    const payload = { channel: channelId, ts: threadTs, limit }
-    if (oldest !== undefined) payload.oldest = oldest
-    const result = await retryOnRateLimit(() => this.call('conversations.replies', this.#botToken, payload, { signal }), { signal })
-    return (result.messages ?? []).filter((message) => oldest === undefined || message.ts !== oldest)
+  async replies(channelId, threadTs, { oldest, latest, limit = 200, maxPages = 10, signal } = {}) {
+    const messages = []
+    const seen = new Set()
+    let cursor
+    for (let page = 0; page < maxPages; page++) {
+      const payload = { channel: channelId, ts: threadTs, limit }
+      if (oldest !== undefined) payload.oldest = oldest
+      if (latest !== undefined) payload.latest = latest
+      if (cursor !== undefined) payload.cursor = cursor
+      const result = await retryOnRateLimit(() => this.call('conversations.replies', this.#botToken, payload, { signal, form: true }), { signal })
+      for (const message of result.messages ?? []) {
+        if (seen.has(message.ts) || (oldest !== undefined && message.ts === oldest)) continue
+        seen.add(message.ts)
+        messages.push(message)
+      }
+      cursor = result.response_metadata?.next_cursor
+      if (result.has_more !== true || typeof cursor !== 'string' || cursor.length === 0) break
+    }
+    return messages
   }
 
   /** Newest-first top-level channel messages before `latest` (exclusive). */
   async history(channelId, { latest, limit = 20, signal } = {}) {
     const payload = { channel: channelId, limit, inclusive: false }
     if (latest !== undefined) payload.latest = latest
-    const result = await retryOnRateLimit(() => this.call('conversations.history', this.#botToken, payload, { signal }), { signal })
+    const result = await retryOnRateLimit(() => this.call('conversations.history', this.#botToken, payload, { signal, form: true }), { signal })
     return result.messages ?? []
   }
 
   /** One user's profile (users:read scope). */
   async userInfo(userId, options = {}) {
-    const result = await this.call('users.info', this.#botToken, { user: userId }, options)
+    const result = await this.call('users.info', this.#botToken, { user: userId }, { ...options, form: true })
     return result.user
   }
 }

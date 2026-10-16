@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createBridge } from '../src/bridge.js'
 import { resolveConfig } from '../src/config.js'
-import { assert, equal, fakeOpencode, fakeSlack, recordingLogger, sleep, test, waitFor } from './_util.mjs'
+import { SlackClient } from '../src/slack.js'
+import { assert, equal, fakeOpencode, fakeSlack, pagedRepliesApi, recordingLogger, sleep, test, waitFor } from './_util.mjs'
 
 /** A bridge over fakes; `run(fn)` cleans the temp state dir afterwards. */
 async function withBridge(overrides, fn) {
@@ -249,6 +250,29 @@ test('bridge: first mention mid-thread carries the thread; later mentions only w
     await bridge.handleEvent(again)
     equal(slack.repliesCalls.at(-1).oldest, ask.ts, 'backfill starts after the watermark')
     equal(opencode.prompts[1].text.split('\n').slice(1, 2), ['[Bob | Slack user <@UOTHER>]: logs attached'], 'own reply excluded, new message included')
+  })
+})
+
+test('bridge: first mention in a >200-message thread carries the newest messages before it', async () => {
+  await withBridge({}, async ({ bridge, slack, opencode }) => {
+    // A bot-to-bot thread: 250 replies, then the mention, then later chatter.
+    const ts = (i) => '1690000000.' + String(i).padStart(6, '0')
+    const thread = [{ ts: ts(0), user: 'UOTHER', text: 'root' }]
+    for (let i = 1; i <= 250; i++) thread.push({ ts: ts(i), user: 'UOTHER', text: 'm' + i })
+    const ask = msg({ ts: ts(251), thread_ts: ts(0), text: '<@UBOT> sum it up' })
+    thread.push(ask)
+    for (let i = 252; i <= 255; i++) thread.push({ ts: ts(i), user: 'UOTHER', text: 'm' + i })
+    // Real SlackClient paging over a Slack-shaped conversations.replies.
+    const api = pagedRepliesApi(thread)
+    const client = new SlackClient({ apiBase: 'https://slack.test/api', botToken: 'xoxb-t', appToken: 'xapp-t', fetchImpl: api.fetchImpl })
+    slack.replies = (channel, threadTs, options) => client.replies(channel, threadTs, options)
+    await bridge.handleEvent(ask)
+    const lines = opencode.prompts[0].text.split('\n')
+    const expected = []
+    for (let i = 221; i <= 250; i++) expected.push('[Bob | Slack user <@UOTHER>]: m' + i)
+    equal(lines.slice(1, 31), expected, 'the 30 messages right before the mention')
+    equal(lines[31], '[End of thread context]')
+    equal(api.calls.map((c) => [c.body.cursor ?? null, c.body.latest]), [[null, ask.ts], ['cur_199', ask.ts]], 'paged past 200, stopped at the mention')
   })
 })
 

@@ -169,7 +169,7 @@ export function createBridge({ config, slack, opencode, logger, now = () => Date
     try {
       if (inThread && config.threadContextMessages > 0) {
         const watermark = store.get(record.key)?.watermark
-        const messages = (await slack.replies(record.channel, record.threadTs, { oldest: watermark }))
+        const messages = (await slack.replies(record.channel, record.threadTs, { oldest: watermark, latest: event.ts }))
           .filter((m) => Number(m.ts) < Number(event.ts))
           // A session that already has history saw its own replies.
           .filter((m) => record.fresh || !isSelf(m))

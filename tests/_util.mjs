@@ -88,8 +88,8 @@ export function fakeSlack({ self = { user_id: 'UBOT', bot_id: 'BBOT', user: 'ope
       fake.reactions.push({ op: 'remove', channel, ts, name })
       return true
     },
-    async replies(channel, threadTs, { oldest } = {}) {
-      fake.repliesCalls.push({ channel, threadTs, oldest })
+    async replies(channel, threadTs, { oldest, latest } = {}) {
+      fake.repliesCalls.push({ channel, threadTs, oldest, latest })
       return (fake.threads.get(channel + ':' + threadTs) ?? []).filter((m) => oldest === undefined || Number(m.ts) > Number(oldest))
     },
     async history(channel) {
@@ -102,6 +102,40 @@ export function fakeSlack({ self = { user_id: 'UBOT', bot_id: 'BBOT', user: 'ope
     },
   }
   return fake
+}
+
+/**
+ * fetch stand-in for a real SlackClient that serves conversations.replies the
+ * way Slack pages it: `thread[0]` is the parent and heads every page, replies
+ * follow oldest first, at most `limit` messages per page (parent included),
+ * then `has_more` + `response_metadata.next_cursor`. `oldest` / `latest` are
+ * inclusive, as Slack's are. Every request lands in `calls`.
+ */
+export function pagedRepliesApi(thread) {
+  const calls = []
+  async function fetchImpl(url, init) {
+    const method = url.slice(url.lastIndexOf('/') + 1)
+    // Read methods go out form-encoded (Slack rejects JSON for them); form
+    // values are strings, so the numeric ones are restored here.
+    const isForm = String(init.headers?.['content-type'] ?? '').startsWith('application/x-www-form-urlencoded')
+    const body = isForm ? Object.fromEntries(new URLSearchParams(init.body)) : JSON.parse(init.body)
+    if (body.limit !== undefined) body.limit = Number(body.limit)
+    calls.push({ method, body })
+    if (method !== 'conversations.replies') return Response.json({ ok: false, error: 'unknown_method' })
+    const [parent, ...rest] = thread
+    const inRange = rest.filter((m) => (body.oldest === undefined || Number(m.ts) >= Number(body.oldest))
+      && (body.latest === undefined || Number(m.ts) <= Number(body.latest)))
+    const start = body.cursor === undefined ? 0 : Number(body.cursor.replace('cur_', ''))
+    const end = start + body.limit - 1
+    const hasMore = end < inRange.length
+    return Response.json({
+      ok: true,
+      messages: [parent, ...inRange.slice(start, end)],
+      has_more: hasMore,
+      response_metadata: { next_cursor: hasMore ? 'cur_' + end : '' },
+    })
+  }
+  return { calls, fetchImpl }
 }
 
 /** Fake OpencodeClient: records calls; tests emit events into the bridge themselves. */

@@ -6,8 +6,9 @@ import { toSlackMrkdwn } from '../src/format.js'
 import { createLoopGuard } from '../src/guard.js'
 import { parseSse } from '../src/opencode.js'
 import { buildInstructions, composePrompt, contextBlock, inert, senderLabel, stripSelfMention } from '../src/prompt.js'
+import { SlackClient } from '../src/slack.js'
 import { createStore } from '../src/store.js'
-import { assert, equal, test } from './_util.mjs'
+import { assert, equal, pagedRepliesApi, test } from './_util.mjs'
 
 // ── format ──────────────────────────────────────────────────────────────────
 
@@ -181,6 +182,48 @@ test('config: tokens file must be private and hold the right token kinds', () =>
   }
 })
 
+// ── slack ───────────────────────────────────────────────────────────────────
+
+/** A thread of `count` replies under parent 100.000000, ts 100.000001… */
+function pagedThread(count) {
+  const ts = (i) => '100.' + String(i).padStart(6, '0')
+  return Array.from({ length: count + 1 }, (_, i) => ({ ts: ts(i), user: 'UOTHER', text: i === 0 ? 'root' : 'm' + i }))
+}
+
+function pagedClient(thread) {
+  const api = pagedRepliesApi(thread)
+  return { api, client: new SlackClient({ apiBase: 'https://slack.test/api', botToken: 'xoxb-t', appToken: 'xapp-t', fetchImpl: api.fetchImpl }) }
+}
+
+test('slack: replies walks every cursor page up to latest and keeps the parent once', async () => {
+  const thread = pagedThread(9)
+  const { api, client } = pagedClient(thread)
+  const all = await client.replies('C1', '100.000000', { latest: '100.000007', limit: 4 })
+  equal(all.map((m) => m.text), ['root', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'], 'every page, parent once, nothing past latest')
+  equal(api.calls.map((c) => c.body.cursor ?? null), [null, 'cur_3', 'cur_6'], 'followed next_cursor until has_more ended')
+  for (const call of api.calls) equal([call.method, call.body.channel, call.body.ts, call.body.latest], ['conversations.replies', 'C1', '100.000000', '100.000007'])
+})
+
+test('slack: replies keeps oldest exclusive on every page', async () => {
+  const { api, client } = pagedClient(pagedThread(9))
+  const all = await client.replies('C1', '100.000000', { oldest: '100.000003', limit: 4 })
+  const ts = all.map((m) => m.ts)
+  assert(!ts.includes('100.000003'), 'the message at oldest is dropped')
+  equal(ts.slice(-6), ['100.000004', '100.000005', '100.000006', '100.000007', '100.000008', '100.000009'], 'everything after oldest, across pages')
+  equal(api.calls.map((c) => c.body.oldest), ['100.000003', '100.000003', '100.000003'])
+})
+
+test('slack: replies stops after maxPages (10 by default) even while Slack has more', async () => {
+  const short = pagedClient(pagedThread(9))
+  const capped = await short.client.replies('C1', '100.000000', { limit: 4, maxPages: 2 })
+  equal(capped.map((m) => m.text), ['root', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6'])
+  equal(short.api.calls.length, 2)
+  const long = pagedClient(pagedThread(2500))
+  const bounded = await long.client.replies('C1', '100.000000')
+  equal(long.api.calls.length, 10, 'default bound')
+  equal([bounded.length, bounded.at(-1).text], [1 + 10 * 199, 'm1990'])
+})
+
 // ── sse ─────────────────────────────────────────────────────────────────────
 
 test('sse: frames split across chunks decode; non-JSON frames skipped', async () => {
@@ -190,4 +233,31 @@ test('sse: frames split across chunks decode; non-JSON frames skipped', async ()
   const out = []
   for await (const event of parseSse(body())) out.push(event)
   equal(out, [{ type: 'a', data: { x: 1 } }, { type: 'b' }])
+})
+
+// ── slack client encoding ───────────────────────────────────────────────────
+
+test('slack: read methods are sent form-encoded, writes as JSON', async () => {
+  const { SlackClient } = await import('../src/slack.js')
+  const seen = []
+  const fetchImpl = async (url, init) => {
+    seen.push({ method: url.split('/').pop(), type: init.headers['content-type'], body: init.body })
+    const method = url.split('/').pop()
+    const body = method === 'users.info' ? { ok: true, user: { name: 'a' } } : method === 'chat.postMessage' ? { ok: true, ts: '1.1' } : { ok: true, messages: [] }
+    return new Response(JSON.stringify(body), { status: 200 })
+  }
+  const slack = new SlackClient({ apiBase: 'https://slack.test/api', botToken: 'xoxb-t', appToken: 'xapp-t', fetchImpl })
+  await slack.replies('C1', '1.0', { latest: '2.0' })
+  await slack.history('C1', { latest: '2.0', limit: 5 })
+  await slack.userInfo('U1')
+  await slack.postMessage('C1', 'hi', { blocks: [] })
+  const byMethod = Object.fromEntries(seen.map((s) => [s.method, s]))
+  for (const m of ['conversations.replies', 'conversations.history', 'users.info']) {
+    equal(byMethod[m].type, 'application/x-www-form-urlencoded', m + ' form-encoded')
+  }
+  equal(new URLSearchParams(byMethod['conversations.replies'].body).get('ts'), '1.0')
+  equal(new URLSearchParams(byMethod['conversations.replies'].body).get('latest'), '2.0')
+  equal(new URLSearchParams(byMethod['users.info'].body).get('user'), 'U1')
+  assert(!new URLSearchParams(byMethod['conversations.replies'].body).has('oldest'), 'undefined params are omitted')
+  equal(byMethod['chat.postMessage'].type, 'application/json; charset=utf-8', 'writes stay JSON (blocks)')
 })
