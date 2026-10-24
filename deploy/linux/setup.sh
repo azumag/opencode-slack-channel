@@ -5,8 +5,8 @@
 #                                            opencode server only (never the Slack bridge). --reconfigure
 #                                            rewrites the configs from the templates (old ones kept as .bak-*)
 #   deploy/linux/setup.sh keygen             print a one-line public key for the secrets handoff
-#   deploy/linux/setup.sh import <blob>      open the sealed secrets (Slack tokens; a Zen API key goes into the
-#                                            env file as OPENCODE_API_KEY and restarts opencode)
+#   deploy/linux/setup.sh import <blob>      open the sealed secrets (Slack tokens; an OpenCode Go/Zen API key goes
+#                                            into the env file as OPENCODE_API_KEY and restarts opencode)
 #   deploy/linux/setup.sh zen-logout         remove opencode's stored OpenCode Console login(s)
 #   deploy/linux/setup.sh netcheck           compare this shell's proxy settings with the env file's and try
 #                                            each against Slack/GitHub (names and status codes only)
@@ -316,7 +316,7 @@ cmd_install() {
   # The agent's shell tools inherit this PATH: keep the installing user's PATH (git, gh, …) after ours.
   # HOME too: systemd gives a unit the passwd home of its User=, which is not always where this was
   # installed (root with HOME=/home/<user>), and the bridge and gh/git all look under HOME.
-  # A git identity set with `git-identity` and a Zen API key from `import` survive a re-install.
+  # A git identity set with `git-identity` and an API key from `import` survive a re-install.
   local kept_git=""
   [ -f "$ENV_FILE" ] && kept_git="$(grep -E '^(GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)|OPENCODE_API_KEY)=' "$ENV_FILE" || true)"
   cat > "$ENV_FILE" <<EOF
@@ -404,14 +404,14 @@ cmd_import() {
   before="$(grep '^OPENCODE_API_KEY=' "$ENV_FILE" | cksum || true)"
   "$OSC_NODE" "$REPO_DIR/deploy/secrets.mjs" open "$HANDOFF_KEY" "$1" --tokens-out "$BOT_TOKENS" --env-out "$ENV_FILE"
   after="$(grep '^OPENCODE_API_KEY=' "$ENV_FILE" | cksum || true)"
-  # A Zen API key lands in the env file, which opencode only reads when it starts.
+  # An OpenCode (Go or Zen) API key lands in the env file, which opencode only reads when it starts.
   [ "$before" != "$after" ] || return 0
   if bridge_running; then
-    say "the bridge is running: the Zen API key takes effect at the next opencode restart"
+    say "the bridge is running: the API key takes effect at the next opencode restart"
   elif opencode_running; then
     service_restart_opencode
     wait_for_opencode || die "opencode did not come back after the restart"
-    say "opencode restarted with the Zen API key"
+    say "opencode restarted with the API key"
   fi
 }
 

@@ -294,6 +294,54 @@ Slack と gh:
 4. 2 と 3 の出力をそのまま返信してください。あわせて、このシェルのプロキシの環境変数が時間で入れ替わるもの（トークン入りで期限があるなど）かどうか、ご存じなら教えてください。
 ```
 
+## 2026-10-24 (7): OpenCode Go で動かす
+
+owner の判断（2026-10-24）: VM の opencode ボットは OpenCode Go の鍵で動かす（Zen の無料モデルは VM の出口で使えないため）。
+
+キットの変更:
+- ボットのモデルは `opencode-go/deepseek-v4.1-flash`（Mac のボットが使っていたもの）。
+- フォールバックは、opencode が一覧に出している Go のモデルのうち、基本料金が入力 $0.5 / 出力 $2（100 万トークンあたり）以内のものから自動で選ぶ。
+  名前の指定（glm-5.3-flash → mimo-v2.6-flash → qwen3.8-flash）は優先順のヒントで、一覧になければ飛ばす。上限を超えるモデルにセッションが
+  いたら、プロンプトの前に上限内のモデルへ移す（Go の利用枠を高いモデルで使い切らないため）。
+- Zen（`opencode`）は無効にした。タイトル生成は opencode の既定どおり Go の小さいモデル（gpt-luna 系）になる。
+- `seal --go-key` で Go の鍵を渡す（Mac の `~/.local/share/opencode/auth.json` の `opencode-go`。Zen の鍵とは別の鍵）。VM の `import` が
+  `OPENCODE_API_KEY` を置き換えて opencode を再起動する。
+
+確かめたこと（2026-10-24、Mac とその上の Linux コンテナ。どちらも Mac の IP から）:
+- 他から切り離した v2 に Go の鍵を `OPENCODE_API_KEY` で入れ、Zen を無効にすると、一覧は opencode-go の 29 モデルだけ。deepseek-v4.1-flash が 2 秒で OK。
+- コンテナでキット一式（install → keygen → seal --go-key → import → check）: `✓ model answers — opencode-go/deepseek-v4.1-flash, 2 s`、
+  `✓ model fallback — … → opencode-go/glm-5.3-flash, 4 s`。鍵は出力に出ていない。
+- VM（Muse の出口）から Go が通るかは未確認。Go は契約したアカウントごとの枠なので IP には左右されないと考えているが、確かめるのは VM の check。
+- Go の利用枠を使い切ったときのエラーの文面は未確認（そのときはフォールバックが Go の安いモデルを順に試し、どれも同じ答えなら失敗として返る）。
+
+```text
+<@U0CCCH69XMW> 方針が決まりました。opencode ボットは OpenCode Go（定額プラン）の鍵で動かします。次をお願いします（ブリッジはまだ起動しないでください）。
+
+1. cd ~/opencode-slack-channel && git pull --ff-only
+2. ~/opencode-slack-channel/deploy/linux/setup.sh netcheck
+   （install の前に。プロキシの写しが古くなっているかを見るためで、状態は変えません。値は表示されません）
+3. ~/opencode-slack-channel/deploy/linux/setup.sh install --reconfigure
+   （いつものプロキシの環境変数が入ったシェルで。モデルの設定が Go に変わり、プロキシの写しも新しくなります）
+4. ~/opencode-slack-channel/deploy/linux/setup.sh keygen
+5. 2 の出力、3 の末尾、4 で出た osc-pub1:… の 1 行を、このスレッドに返信してください（公開鍵なので貼って大丈夫です）。
+```
+
+Mac 側（Muse が返した `osc-pub1:…` を使う）:
+
+```sh
+cd ~/work/opencode-slack-channel
+node deploy/secrets.mjs seal 'osc-pub1:…' --go-key ~/.local/share/opencode/auth.json
+```
+
+```text
+<@U0CCCH69XMW> 続きです（鍵の値は表示されません）。
+
+1. ~/opencode-slack-channel/deploy/linux/setup.sh import 'osc-sealed1:…'
+2. ~/opencode-slack-channel/deploy/linux/setup.sh check
+
+両方の出力を返信してください。
+```
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、
@@ -338,11 +386,10 @@ done
 
 - **スレッドとセッションの対応は引き継がない。** 移す前からあるスレッドでメンションすると、VM で新しいセッションになる（スレッドの直近 30 件を文脈として渡すので、話の流れはある程度つながる）。
 - **作業場所は VM の `~/work`**（最初は空）。Mac の `~/work` のリポジトリは見えない。GitHub は VM で `gh` にログインしているアカウントで操作する。
-- **モデルは Zen の無料モデルだけで、自動で選ぶ。** Mac は `opencode-go/deepseek-v4.1-flash`（有料）→ gemma4:12b（Mac の tailnet 内の
-  Ollama）→ `x-preview-f-free` だった。VM は `glm-5.3-flash-free` から始め、失敗したら、その時点で一覧にある無料モデルを順に試す。
-  順番は `fallbackModels` に書いたもの（deepseek-v4.1-flash-free → mimo-v2.6-flash-free → beam-free → nemotron-3.5-super-vl-free →
-  nemotron-3-ultra-free → big-pickle → flint-40b-free → nemotron-3.5-lightning-free。10/18 に Mac で使っていた無料チェーンの順）のうち
-  一覧にあるもの、そのあとに残りの無料モデルを新しい順。
+- **モデルは OpenCode Go で、自動で選ぶ。** Mac は `opencode-go/deepseek-v4.1-flash` → gemma4:12b（Mac の tailnet 内の Ollama）→
+  `x-preview-f-free` だった。VM は `opencode-go/deepseek-v4.1-flash` から始め、失敗したら、その時点で一覧にある Go のモデルのうち基本料金が
+  入力 $0.5 / 出力 $2 以内のものを順に試す（ヒントの glm-5.3-flash → mimo-v2.6-flash → qwen3.8-flash、そのあと残りを新しい順）。
+  Zen の無料モデルは使わない（VM の出口の IP では無料枠が尽きていた。「2026-10-24 (5)〜(7)」）。
 - **`secrets-hygiene.md` を VM では instructions に入れた。** Mac では `~/.config/opencode/rules/` に置いてあるだけで、opencode.json から読まれていない。GitHub に投稿するときは `~/.opencode-slack/agent-guards/gh-comment` 経由になる。
 - **Mac のグローバルプラグイン（auto-continue / loop / fiosracht-model-sync）は入れない。** ボットのセッションで動いた記録が無く、fiosracht プロバイダはもう無い。
 - **Zen 無料モデルの日次枠は IP ごと**（とされる）なので、VM は Mac と別の枠になる。VM の IP では尽きていたので、Zen の API キーで呼ぶ（「2026-10-24 (5)」）。

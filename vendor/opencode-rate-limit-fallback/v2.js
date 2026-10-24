@@ -75,6 +75,24 @@ function isFree(model) {
     return (model.cost ?? []).every((cost) => (cost.input ?? 0) === 0 && (cost.output ?? 0) === 0);
 }
 /**
+ * Within autoFallback.maxCost ({ input, output } in USD per 1M tokens; a missing field is no limit),
+ * judged by the base price (the cost entry without a long-context `tier`).
+ */
+function withinCost(model, maxCost) {
+    const base = (model.cost ?? []).find((cost) => cost.tier === undefined) ?? model.cost?.[0] ?? {};
+    return (maxCost.input === undefined || (base.input ?? 0) <= maxCost.input)
+        && (maxCost.output === undefined || (base.output ?? 0) <= maxCost.output);
+}
+function costLimit(value) {
+    if (!value || typeof value !== "object")
+        return undefined;
+    const limit = {};
+    for (const key of ["input", "output"])
+        if (Number.isFinite(value[key]))
+            limit[key] = value[key];
+    return Object.keys(limit).length > 0 ? limit : undefined;
+}
+/**
  * The models a session walks through on consecutive failures: its own model,
  * then the configured fallbacks listed after it. A model that is not in
  * `fallbackModels` has no fallbacks: it is retried after a cooldown when
@@ -103,9 +121,10 @@ export default {
         const fallbacks = mode === "wait" ? [] : (config.fallbackModels ?? [])
             .filter((model) => typeof model?.providerID === "string" && typeof model?.modelID === "string")
             .map(toModelRef);
-        // autoFallback ({ providers, freeOnly, unavailableMs }; an opencode-slack-channel
+        // autoFallback ({ providers, freeOnly, maxCost, unavailableMs }; an opencode-slack-channel
         // addition) appends every model the server lists now for those providers
-        // (only free ones unless freeOnly is false) to the configured fallbacks, so
+        // (only free ones unless freeOnly is false; then, with maxCost, only those whose
+        // base price is within it) to the configured fallbacks, so
         // models that come and go need no config change. Configured fallbacks the
         // server no longer lists are skipped, and so is a model that answered
         // "unavailable" within unavailableMs (default 6 h), or any free model of a
@@ -115,6 +134,7 @@ export default {
             ? {
                 providers: config.autoFallback.providers,
                 freeOnly: config.autoFallback.freeOnly !== false,
+                maxCost: costLimit(config.autoFallback.maxCost),
                 unavailableMs: Number.isFinite(config.autoFallback.unavailableMs) ? config.autoFallback.unavailableMs : DEFAULT_UNAVAILABLE_MS,
                 freeLimitMs: Number.isFinite(config.autoFallback.freeLimitMs) ? config.autoFallback.freeLimitMs : DEFAULT_FREE_LIMIT_MS,
             }
@@ -151,22 +171,26 @@ export default {
                 return [];
             }
         };
-        // A model a session may stay on: listed, not "unavailable" lately and, with
-        // freeOnly, free. A paid model can be listed once the provider has a key, and
-        // a session can land on one (the subagent tool takes a model argument).
+        // Models of autoFallback.providers a session may use: free ones with freeOnly,
+        // else those within maxCost (all of them without it).
+        const affordable = (listed) => !auto || !auto.providers.includes(listed.providerID)
+            || (auto.freeOnly ? isFree(listed) : auto.maxCost === undefined || withinCost(listed, auto.maxCost));
+        // A model a session may stay on: listed, not "unavailable" lately and affordable.
+        // A pricier model can be listed once the provider has a key, and a session can
+        // land on one (the subagent tool takes a model argument).
         const usable = async (model) => {
             if (isUnavailable(model))
                 return false;
             const listed = (await listedModels()).find((candidate) => candidate.providerID === model.providerID && candidate.id === model.id);
-            return listed !== undefined && !(auto?.freeOnly && auto.providers.includes(model.providerID) && !isFree(listed));
+            return listed !== undefined && affordable(listed);
         };
         // Configured fallbacks the server lists, then the other listed models of
         // autoFallback.providers, newest release first.
         const autoFallbacks = async () => {
             const listed = await listedModels();
-            const configured = fallbacks.filter((model) => listed.some((candidate) => candidate.providerID === model.providerID && candidate.id === model.id));
+            const configured = fallbacks.filter((model) => listed.some((candidate) => candidate.providerID === model.providerID && candidate.id === model.id && affordable(candidate)));
             const extra = listed
-                .filter((model) => model.capabilities?.tools !== false && auto.providers.includes(model.providerID) && (!auto.freeOnly || isFree(model)))
+                .filter((model) => model.capabilities?.tools !== false && auto.providers.includes(model.providerID) && affordable(model))
                 .sort((a, b) => (b.time?.released ?? 0) - (a.time?.released ?? 0) || a.id.localeCompare(b.id))
                 .map((model) => ({ providerID: model.providerID, id: model.id }))
                 .filter((ref) => !configured.some((model) => sameModel(model, ref)));
@@ -235,8 +259,9 @@ export default {
             await switchModel(sessionID, streak.original);
         };
         // Before a real prompt runs (autoFallback): a session on a model the server
-        // no longer lists, one that answered "unavailable" lately, or (freeOnly) a
-        // paid one, moves to the first usable fallback instead of failing first.
+        // no longer lists, one that answered "unavailable" lately, or one over the
+        // price limit (freeOnly / maxCost), moves to the first usable fallback
+        // instead of failing first.
         const leaveUnusableModel = async (sessionID) => {
             const current = await currentModel(sessionID);
             if (current === undefined || !auto.providers.includes(current.providerID) || (await usable(current)))

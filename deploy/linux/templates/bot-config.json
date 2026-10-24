@@ -1,7 +1,7 @@
 {
   "model": {
-    "providerID": "opencode",
-    "id": "glm-5.3-flash-free"
+    "providerID": "opencode-go",
+    "id": "deepseek-v4.1-flash"
   },
   "cwd": "~/work",
   "channelCwd": {},

@@ -4,13 +4,14 @@
 //
 //   on the target:  node deploy/secrets.mjs keygen <keyFile>
 //                   → prints a one-line public key (osc-pub1:…); the private key stays in <keyFile> (600)
-//   on the source:  node deploy/secrets.mjs seal <osc-pub1:…> [--tokens FILE] [--auth FILE --provider ID …] [--zen-key FILE]
+//   on the source:  node deploy/secrets.mjs seal <osc-pub1:…> [--tokens FILE] [--auth FILE --provider ID …] [--go-key FILE | --zen-key FILE]
 //                   → prints a one-line sealed blob (osc-sealed1:…)
-//                     --zen-key: an OpenCode Zen API key, from an opencode auth.json (its "opencode" api entry)
-//                     or a file holding just the key
+//                     --go-key / --zen-key: an OpenCode Go / Zen API key, from an opencode auth.json (its
+//                     "opencode-go" / "opencode" api entry) or a file holding just the key
 //   on the target:  node deploy/secrets.mjs open <keyFile> <osc-sealed1:…> --tokens-out FILE [--auth-out FILE] [--env-out FILE]
 //                   → writes the Slack tokens file, merges providers into an opencode auth.json and/or sets
-//                     OPENCODE_API_KEY in an env file (all 600), then deletes <keyFile> (one key per handoff)
+//                     OPENCODE_API_KEY in an env file (all 600; opencode reads it for both Go and Zen), then
+//                     deletes <keyFile> (one key per handoff)
 //
 // No secret value is ever written to stdout/stderr; only names and counts.
 
@@ -65,19 +66,22 @@ function parseArgs(argv) {
   return { positional, options }
 }
 
-const ZEN_KEY_VAR = 'OPENCODE_API_KEY'
+const API_KEY_VAR = 'OPENCODE_API_KEY'
 
-/** The Zen API key in an opencode auth.json ({"opencode": {"type": "api", "key"}}) or a file holding just the key. */
-function readZenKey(path) {
+/**
+ * An OpenCode API key: the `entry` ("opencode-go" or "opencode") of an opencode auth.json
+ * ({"opencode-go": {"type": "api", "key"}}), or a file holding just the key.
+ */
+function readOpencodeKey(path, entry) {
   const text = readFileSync(expand(path), 'utf8').trim()
   let key = text
   if (text.startsWith('{')) {
-    const entry = JSON.parse(text).opencode
-    if (entry?.type !== 'api' || typeof entry.key !== 'string') die(path + ' has no "opencode" API key (an OAuth login is not a key: create one in the OpenCode console)')
-    key = entry.key.trim()
+    const found = JSON.parse(text)[entry]
+    if (found?.type !== 'api' || typeof found.key !== 'string') die(path + ' has no "' + entry + '" API key (an OAuth login is not a key: create one in the OpenCode console)')
+    key = found.key.trim()
   }
   // It goes into an env file read by both systemd and the shell: keep it to characters neither interprets.
-  if (!key || /["'\\$`\s]/.test(key)) die('the Zen API key in ' + path + ' is empty or has quotes, backslashes, $, backticks or spaces')
+  if (!key || /["'\\$`\s]/.test(key)) die('the API key in ' + path + ' is empty or has quotes, backslashes, $, backticks or spaces')
   return key
 }
 
@@ -98,7 +102,7 @@ function keygen(keyFile) {
 }
 
 function seal(pub, options) {
-  if (!pub?.startsWith(PUB_PREFIX)) die('usage: secrets.mjs seal <' + PUB_PREFIX + '…> [--tokens FILE] [--auth FILE --provider ID …] [--zen-key FILE]', 2)
+  if (!pub?.startsWith(PUB_PREFIX)) die('usage: secrets.mjs seal <' + PUB_PREFIX + '…> [--tokens FILE] [--auth FILE --provider ID …] [--go-key FILE | --zen-key FILE]', 2)
   const recipientX = pub.slice(PUB_PREFIX.length).trim()
   const payload = { v: 1 }
   const summary = []
@@ -118,11 +122,12 @@ function seal(pub, options) {
     }
     summary.push('opencode auth: ' + options.provider.join(', '))
   }
-  if (options.zenKey) {
-    payload.zenApiKey = readZenKey(options.zenKey)
-    summary.push('Zen API key')
+  if (options.goKey && options.zenKey) die('give --go-key or --zen-key, not both: opencode reads one OPENCODE_API_KEY', 2)
+  if (options.goKey || options.zenKey) {
+    payload.opencodeApiKey = options.goKey ? readOpencodeKey(options.goKey, 'opencode-go') : readOpencodeKey(options.zenKey, 'opencode')
+    summary.push(options.goKey ? 'OpenCode Go API key' : 'OpenCode Zen API key')
   }
-  if (summary.length === 0) die('nothing to seal (give --tokens, --auth + --provider and/or --zen-key)', 2)
+  if (summary.length === 0) die('nothing to seal (give --tokens, --auth + --provider and/or --go-key / --zen-key)', 2)
 
   const recipient = publicKeyFromX(recipientX)
   const { privateKey: ephPrivate, publicKey: ephPublic } = generateKeyPairSync('x25519')
@@ -171,10 +176,11 @@ function open(keyFile, sealed, options) {
     writePrivate(out, JSON.stringify(merged, null, 2) + '\n')
     written.push('opencode auth (' + Object.keys(payload.opencodeAuth).join(', ') + ') → ' + options.authOut)
   }
-  if (payload.zenApiKey) {
-    if (!options.envOut) die('the blob holds a Zen API key: give --env-out <file>', 2)
-    setEnvLine(expand(options.envOut), ZEN_KEY_VAR, payload.zenApiKey)
-    written.push('Zen API key → ' + ZEN_KEY_VAR + ' in ' + options.envOut)
+  const apiKey = payload.opencodeApiKey ?? payload.zenApiKey
+  if (apiKey) {
+    if (!options.envOut) die('the blob holds an OpenCode API key: give --env-out <file>', 2)
+    setEnvLine(expand(options.envOut), API_KEY_VAR, apiKey)
+    written.push('OpenCode API key → ' + API_KEY_VAR + ' in ' + options.envOut)
   }
   rmSync(keyFile, { force: true })
   process.stdout.write(written.join('\n') + '\nhandoff key deleted\n')

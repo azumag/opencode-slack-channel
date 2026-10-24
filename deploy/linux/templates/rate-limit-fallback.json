@@ -5,41 +5,26 @@
   "otherModels": "wait",
   "autoFallback": {
     "providers": [
-      "opencode"
-    ]
+      "opencode-go"
+    ],
+    "freeOnly": false,
+    "maxCost": {
+      "input": 0.5,
+      "output": 2
+    }
   },
   "fallbackModels": [
     {
-      "providerID": "opencode",
-      "modelID": "deepseek-v4.1-flash-free"
+      "providerID": "opencode-go",
+      "modelID": "glm-5.3-flash"
     },
     {
-      "providerID": "opencode",
-      "modelID": "mimo-v2.6-flash-free"
+      "providerID": "opencode-go",
+      "modelID": "mimo-v2.6-flash"
     },
     {
-      "providerID": "opencode",
-      "modelID": "beam-free"
-    },
-    {
-      "providerID": "opencode",
-      "modelID": "nemotron-3.5-super-vl-free"
-    },
-    {
-      "providerID": "opencode",
-      "modelID": "nemotron-3-ultra-free"
-    },
-    {
-      "providerID": "opencode",
-      "modelID": "big-pickle"
-    },
-    {
-      "providerID": "opencode",
-      "modelID": "flint-40b-free"
-    },
-    {
-      "providerID": "opencode",
-      "modelID": "nemotron-3.5-lightning-free"
+      "providerID": "opencode-go",
+      "modelID": "qwen3.8-flash"
     }
   ]
 }

@@ -96,13 +96,14 @@ function catalogNote(logFile) {
  * plugin moved the session to another model.
  */
 /**
- * What the running opencode server holds for OpenCode Console (Zen): the methods of stored logins
- * (account labels are not read out) and whether it sees OPENCODE_API_KEY in its own environment.
+ * What the running opencode server holds for an OpenCode integration ("opencode" = Zen, "opencode-go"):
+ * the methods of stored logins (account labels are not read out) and whether it sees OPENCODE_API_KEY
+ * in its own environment.
  */
-function consoleAuth(bin) {
+function consoleAuth(bin, integrationID) {
   try {
     const list = JSON.parse(execFileSync(bin, ['auth', 'list', '--format', 'json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30000 }))
-    const connections = list.filter((integration) => integration.id === 'opencode').flatMap((integration) => integration.connections ?? [])
+    const connections = list.filter((integration) => integration.id === integrationID).flatMap((integration) => integration.connections ?? [])
     const envKey = connections.find((connection) => connection.type === 'env' && connection.name === 'OPENCODE_API_KEY')
     return {
       logins: connections.filter((connection) => connection.type === 'credential').map((connection) => connection.method ?? '?'),
@@ -202,15 +203,20 @@ if (config) {
   }
 }
 
-if (config?.model && config.model.providerID !== 'opencode') {
-  note('model credentials', config.model.providerID + ' needs a key in opencode (opencode2 auth login); only Zen free models work without one')
+// OpenCode Zen (integration "opencode", OpenCode Console) and OpenCode Go both take OPENCODE_API_KEY.
+const OPENCODE_INTEGRATIONS = { opencode: 'OpenCode Console', 'opencode-go': 'OpenCode Go' }
+const modelProvider = config?.model?.providerID
+if (modelProvider && !Object.hasOwn(OPENCODE_INTEGRATIONS, modelProvider)) {
+  note('model credentials', modelProvider + ' needs a key in opencode (opencode2 auth login)')
 }
-if (config?.model?.providerID === 'opencode') {
-  const auth = opencode ? consoleAuth(opts['opencode-bin']) : undefined
+if (modelProvider && Object.hasOwn(OPENCODE_INTEGRATIONS, modelProvider)) {
+  const name = OPENCODE_INTEGRATIONS[modelProvider]
+  const auth = opencode ? consoleAuth(opts['opencode-bin'], modelProvider) : undefined
   note('model credentials', [
-    process.env.OPENCODE_API_KEY ? 'Zen API key set in the bot env (OPENCODE_API_KEY, value not shown)' : 'no Zen API key in the bot env',
-    ...(auth === undefined ? ['OpenCode Console logins unknown'] : [
-      auth.logins.length === 0 ? 'no OpenCode Console login' : 'OpenCode Console login: ' + auth.logins.join(', ') + ' (setup.sh zen-logout removes it)',
+    process.env.OPENCODE_API_KEY ? 'OpenCode API key set in the bot env (OPENCODE_API_KEY, value not shown)'
+      : 'no OpenCode API key in the bot env' + (modelProvider === 'opencode' ? '' : ': ' + name + ' needs one (seal --go-key, then import)'),
+    ...(auth === undefined ? [name + ' logins unknown'] : [
+      auth.logins.length === 0 ? 'no stored ' + name + ' login' : 'stored ' + name + ' login: ' + auth.logins.join(', ') + (modelProvider === 'opencode' ? ' (setup.sh zen-logout removes it)' : ''),
       ...(process.env.OPENCODE_API_KEY ? [auth.serverKey] : []),
     ]),
   ].join('; '))
@@ -261,14 +267,14 @@ for (const [key, envName] of [['user.name', 'GIT_AUTHOR_NAME'], ['user.email', '
 if (opts.model && opencode && config) {
   try {
     const waited = config.model ? await waitForModel(opts['opencode-bin'], config.model) : 0
-    if (waited < 0) note('model list', config.model.providerID + '/' + config.model.id + ' is not listed by the server (opencode2 models); the fallback plugin should move sessions to another free model')
+    if (waited < 0) note('model list', config.model.providerID + '/' + config.model.id + ' is not listed by the server (opencode2 models); the fallback plugin should move sessions to another model')
     if (waited > 0) note('model list', 'the model appeared after ' + waited + ' s (fresh server)')
     await probeModel(opencode, config, opts['opencode-log'])
   } catch (error) {
     bad('model answers', errText(error))
   }
   try {
-    await probeModel(opencode, config, opts['opencode-log'], { label: 'model fallback', model: { providerID: 'opencode', id: 'osc-check-missing-model' }, expectSwitch: true })
+    await probeModel(opencode, config, opts['opencode-log'], { label: 'model fallback', model: { providerID: config.model?.providerID ?? 'opencode', id: 'osc-check-missing-model' }, expectSwitch: true })
   } catch (error) {
     bad('model fallback', errText(error))
   }
