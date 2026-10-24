@@ -494,6 +494,40 @@ cron ジョブ opencode-bot-autorecover はそのままにしてください。�
 あわせて、netcheck で /etc/environment の更新時刻が 02:19:55 JST になっていた件について、VM の再起動（作り直し）と判断した根拠があれば教えてください。
 ```
 
+## 2026-10-25: 03:02 の経過確認（Muse の報告）— 10 分ごとの再起動は止まった
+
+`setup.sh status`（03:02 JST）: 両サービスとも 17:24:43 / 17:24:50 UTC（02:24 JST の net-refresh）から 37 分動き続けている。
+`start-saved acted` の最後の 5 行（UTC）:
+
+```text
+17:09:54 RESTARTING — env file's: CONNECT/HTTP 407 000; this shell's: 200 200; taking this shell's
+17:10:04 done
+17:19:56 RESTARTING — env file's: CONNECT/HTTP 407 000; this shell's: 200 200; taking this shell's
+17:22:14 RECOVERING — the bot should run but does not; install again …
+17:22:21 done
+```
+
+- 02:24 の net-refresh のあと、cron（定時なら 02:29・02:39・02:49・02:59 の 4 回）は何もしていない（動いたときだけ履歴に残る）。直す前は 01:39〜02:19 の 5 回すべてが
+  再起動していた。10 分ごとの再起動が止まったことは実測で確かめた。
+- **なぜ止まったかの訂正:** `/etc/environment` は「起動時の長く通る認証情報」ではなかった。Claude キットの 02:48 の netcheck では、
+  シェルの値には `user:pass@` があり、環境ファイル（= `/etc/environment`）の値には無い。`/etc/environment` のプロキシ URL には
+  認証情報が入っていない。プロキシは認証情報なしの接続を通し（Hermes の 3b、02:1x JST）、期限の切れた認証情報は 407 で断る（同じ 3b で、でたらめな
+  認証情報は 200 だった。断るのは期限切れだけなのかもしれないが、未確認）。
+  だから `/etc/environment` を写せば切れない。キットの動き（通る方を写す）はそのままで正しい。説明だけを直した（README とコメント）。
+- **02:19:55 の件の訂正:** 上の節で「作り直しなしで書き直された可能性が高い」と書いたのは、たぶん誤り。17:19:56 の RESTARTING
+  には `done` が続かず、2 分後の 17:22:14 に RECOVERING（サービスが動いていない → install し直し）が記録されている。
+  `/etc/environment` の書き直し（17:19:55）と合わせると、02:20 ごろに VM が作り直され、02:22 に start-saved がボットを戻した、
+  と読むのが自然。そうなら、作り直しのあとの初めての自動復旧。ただし次の 2 点は未確認:
+  - 作り直しがあったか（追加の依頼の `uptime -s` で決まる）。
+  - 17:22:14 の start-saved を誰が動かしたか。cron の定時（毎時 9 分 47 秒〜）から外れている。
+  なお、この RECOVERING は修正前の版（b7718af）で動いたので、シェルの設定を写していた。それを 02:24 の net-refresh が
+  `/etc/environment` のものに置き換えた。
+
+まだ確かめていないこと:
+- 02:24 以降に、ボットがメンションに返事するか（check のモデル呼び出しは 02:24 に通った）。
+- 追加の依頼（`uptime -s`、認証情報なし／誤りの CONNECT）の答え。
+- 修正後の版での、作り直しからの自動復旧（RECOVERING の行に `proxy settings from /etc/environment` が出るか）。
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、

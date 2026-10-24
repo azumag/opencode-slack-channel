@@ -353,9 +353,9 @@ proxy_refused() { case "$1" in 401\ *|403\ *|407\ *|000\ 401|000\ 403|000\ 407) 
 proxy_passes() { case "$1" in 200\ *|000\ 200) return 0 ;; esac; return 1; }
 
 # Where the services' proxy settings come from. On Muse's VM every shell (each login, each run of a Muse
-# cron job) gets its own proxy credentials, and a cron run's are refused (407) within minutes of the run;
-# /etc/environment holds the ones written when the VM booted, and those kept working (2026-10-25: a copy
-# from a cron run was refused 4 minutes later, /etc/environment's still passed 80 minutes after boot).
+# cron job) gets a proxy URL with its own user:pass@, and a cron run's are refused (407) within minutes of
+# the run; /etc/environment's proxy URL has no credentials and passes (2026-10-25: a copy from a cron run
+# was refused 4 minutes later; /etc/environment's passed throughout, and the bot ran on it with no restart).
 # So /etc/environment wins when it has a proxy that gets through; this shell's settings otherwise.
 NET_SOURCE="this shell"
 etc_env_get() { sed -n "s/^$1=//p" /etc/environment 2>/dev/null | tail -n 1 | sed 's/^"//; s/"$//'; }
