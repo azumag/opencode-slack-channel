@@ -27,7 +27,7 @@ let failures = 0
 const ok = (label, detail = '') => console.log('✓ ' + label + (detail ? ' — ' + detail : ''))
 const bad = (label, detail = '') => { failures++; console.log('✗ ' + label + (detail ? ' — ' + detail : '')) }
 const note = (label, detail = '') => console.log('· ' + label + (detail ? ' — ' + detail : ''))
-const errText = (error) => error?.message ?? String(error)
+const errText = (error) => (error?.message ?? String(error)) + (error?.cause ? ' (' + (error.cause.code ?? error.cause.message) + ')' : '')
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function slackCall(method, token) {
@@ -69,12 +69,14 @@ async function waitForModel(bin, model) {
  */
 function catalogNote(logFile) {
   if (!logFile || !existsSync(logFile)) return
-  const since = Date.now() - 30 * 60000
+  // Since the server started (it rewrites service.json then), at most the last 30 min.
+  const since = Math.max(Date.now() - 30 * 60000, existsSync(serviceFile) ? statSync(serviceFile).mtimeMs : 0)
+  const sinceText = new Date(since).toISOString().slice(11, 16) + ' UTC'
   const failures = readFileSync(logFile, 'utf8').split('\n').filter((line) => line.includes('Failed to fetch models.dev')
     && Date.parse(line.match(/timestamp=(\S+)/)?.[1] ?? '') >= since)
-  if (failures.length === 0) return note('model catalog', 'no fetch failures in the last 30 min')
+  if (failures.length === 0) return note('model catalog', 'no fetch failures since ' + sinceText)
   const cause = failures.at(-1).match(/cause="([^"\\]*)/)?.[1] ?? '?'
-  note('model catalog', failures.length + ' failed fetch(es) of https://models.opencode.ai/api.json in the last 30 min (' + cause.slice(0, 120)
+  note('model catalog', failures.length + ' failed fetch(es) of https://models.opencode.ai/api.json since ' + sinceText + ' (' + cause.slice(0, 120)
     + ') — the server only knows the models built into this opencode version; new free models will not appear')
 }
 
@@ -138,6 +140,9 @@ if (mode !== 'all') {
 }
 
 ok('node', process.version)
+const proxyNames = Object.keys(process.env).filter((name) => /^(https?|all|no)_proxy$/i.test(name))
+if (proxyNames.length === 0) note('network', 'no proxy settings: direct connections')
+else note('network', 'proxy settings: ' + proxyNames.join(', ') + (process.env.NODE_USE_ENV_PROXY === '1' ? ' (the bridge uses them: NODE_USE_ENV_PROXY=1)' : ' (the bridge ignores them without NODE_USE_ENV_PROXY=1)'))
 try {
   ok('opencode CLI', execFileSync(opts['opencode-bin'], ['--version'], { encoding: 'utf8' }).trim())
 } catch (error) {
@@ -182,6 +187,14 @@ if (config) {
     const conn = await slackCall('apps.connections.open', tokens.appToken)
     if (conn.ok) ok('Slack app token', 'Socket Mode URL issued (not connected)')
     else bad('Slack app token', 'apps.connections.open: ' + conn.error)
+    // The socket's host over plain HTTPS, by the same route a WebSocket takes (no session, no ticket).
+    const socketHost = conn.ok ? new URL(conn.url).host : 'wss-primary.slack.com'
+    try {
+      const res = await fetch('https://' + socketHost + '/', { signal: AbortSignal.timeout(20000) })
+      ok('Slack socket host', socketHost + ' reachable (HTTP ' + res.status + ')')
+    } catch (error) {
+      bad('Slack socket host', socketHost + ': ' + errText(error))
+    }
   } catch (error) {
     bad('Slack tokens', errText(error))
   }

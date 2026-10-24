@@ -55,6 +55,38 @@ load_env() {
   set +a
 }
 
+# Proxy and CA settings the services take over from the installing shell.
+NET_VARS="http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY NODE_USE_ENV_PROXY
+NODE_EXTRA_CA_CERTS NODE_USE_SYSTEM_CA SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE"
+
+# Append this shell's NET_VARS to the env file ($1) as NAME="value"; NET_NAMES gets the names.
+# Loopback (bridge → opencode server, opencode CLI → server) never goes through the proxy, and Node
+# ignores proxy variables unless NODE_USE_ENV_PROXY=1, so that is turned on whenever a proxy is set.
+write_net_env() {
+  local name value proxy=""
+  NET_NAMES=()
+  for name in $NET_VARS; do
+    value="${!name:-}"
+    [ -n "$value" ] || continue
+    case "$value" in *[\"\\\$\`]*) say "warning: $name has a character the env file cannot carry; not copied"; continue ;; esac
+    case "$name" in
+      no_proxy|NO_PROXY) value="$value,127.0.0.1,localhost,::1" ;;
+      *_proxy|*_PROXY) proxy=1 ;;
+    esac
+    printf '%s="%s"\n' "$name" "$value" >> "$1"
+    NET_NAMES+=("$name")
+  done
+  [ -n "$proxy" ] || return 0
+  if [ -z "${no_proxy:-}${NO_PROXY:-}" ]; then
+    printf 'no_proxy="127.0.0.1,localhost,::1"\nNO_PROXY="127.0.0.1,localhost,::1"\n' >> "$1"
+    NET_NAMES+=(no_proxy NO_PROXY)
+  fi
+  if [ -z "${NODE_USE_ENV_PROXY:-}" ]; then
+    printf 'NODE_USE_ENV_PROXY=1\n' >> "$1"
+    NET_NAMES+=(NODE_USE_ENV_PROXY)
+  fi
+}
+
 supervisor() {
   if [ -n "${OSC_SUPERVISOR:-}" ]; then printf '%s\n' "$OSC_SUPERVISOR"; return; fi
   if [ -f "$OSC_HOME/supervisor" ]; then cat "$OSC_HOME/supervisor"; return; fi
@@ -294,8 +326,13 @@ OSC_HOME=$OSC_HOME
 OSC_NODE=$node
 EOF
   [ -n "$kept_git" ] && printf '%s\n' "$kept_git" >> "$ENV_FILE"
+  # A service starts without this shell's proxy settings. Where direct egress is blocked (Muse's VM
+  # answers https on :443 with plain text) opencode then reaches neither the models nor their catalog.
+  write_net_env "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   say "supervisor: $mode"
+  if [ "${#NET_NAMES[@]}" -gt 0 ]; then say "network settings taken from this shell (values not shown): ${NET_NAMES[*]}"
+  else say "no proxy settings in this shell: the services connect directly"; fi
 
   step "opencode config ($OC_CONFIG)"
   mkdir -p "$OC_CONFIG" "$XDG_DIR"/{data,state,cache}/opencode
@@ -404,7 +441,10 @@ cmd_check() {
   load_env
   local args=()
   [ "${1:-}" = --no-model ] || args+=(--model)
-  "$OSC_NODE" "$REPO_DIR/deploy/linux/check.mjs" all "${args[@]}" \
+  # With nothing but the env file, as the services see it: a setting only this shell has would
+  # otherwise pass here and fail after start.
+  env -i "$BASH" -c 'set -a; . "$0"; set +a; exec "$@"' "$ENV_FILE" \
+    "$OSC_NODE" "$REPO_DIR/deploy/linux/check.mjs" all "${args[@]}" \
     --bot-config "$BOT_CONFIG" --tokens "$BOT_TOKENS" --opencode-bin "$OC_BIN" --opencode-log "$XDG_DIR/data/opencode/log/opencode.log"
 }
 

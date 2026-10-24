@@ -65,6 +65,8 @@ check の出力をそのまま返信してください（秘密の値は出ま�
 
 - `✓ Slack bot token — bot … (U0C9Y2F2HEV)`: 同じボットのトークンが入った。
 - `✓ Slack app token — Socket Mode URL issued (not connected)`: app トークンが有効。
+- `✓ Slack socket host — … reachable`: ソケットの接続先ホストまで届く（WebSocket と同じ経路の HTTPS。ソケットは開かない）。
+- `· network — proxy settings: …`: サービスの環境にあるプロキシ変数の名前。check はサービスと同じ環境（env ファイルだけ）で走る。
 - `✓ model answers — opencode/…, N s`: VM からモデルを呼べる（設定のモデルが一覧になければ、プラグインが選んだ別の無料モデルの名前が出る）。
   テスト用のセッションは削除される。失敗したら、opencode のログ（`~/.opencode-slack/xdg/data/opencode/log/opencode.log`）の ERROR 行が
   `· opencode log —` として出る。
@@ -130,6 +132,44 @@ opencode 2.0.31 に組み込まれた一覧だけで動いていた。そこに 
    （プロキシの環境変数の「名前」だけ。値は貼らないでください）
 
 3〜6 の出力を返信してください。
+```
+
+## 2026-10-24 (3): プロキシの設定をサービスに渡す
+
+依頼文 (2) の結果で原因が分かった。
+
+- Muse のシェルには `http(s)_proxy` / `all_proxy` / `no_proxy`（大文字も）があり、curl は 200 を返す。
+- 同じ curl をボットの環境（env ファイルだけ）で実行すると、0.03 秒で `wrong version number` になる。
+- opencode のログには、モデル呼び出しとカタログ取得の両方で `unknown certificate verification error` が出ていた。
+
+VM は、プロキシを通さずに外へ :443 でつなぐと TLS を話さない何かに当たる。systemd のサービスはシェルの環境変数を引き継がないので、
+opencode は直接つなごうとして失敗していた。モデルが呼べていなかったので、ボットは動いていなかった。Mac で確かめたこと:
+
+- opencode（Bun 1.4.2）は、TLS を話さない相手に https でつなぐと、VM と同じ「unknown certificate verification error」を出す。
+  見知らぬ CA（中身を検査する種類の中継、MITM）なら「unable to verify the first certificate」になるので、そうではない。
+- opencode は `HTTPS_PROXY` を読む。Node（ブリッジ）は `NODE_USE_ENV_PROXY=1` がないと読まない。付ければ fetch も WebSocket もプロキシを通り、
+  `NO_PROXY` の 127.0.0.1 は直接つなぐ。
+
+直したこと:
+
+- `install` が、実行したシェルのプロキシと CA の環境変数を env ファイルに写す（値は表示しない。ファイルは権限 600）。
+  `no_proxy` / `NO_PROXY` には `127.0.0.1,localhost,::1` を足し（ブリッジ → opencode、CLI → opencode はローカル）、プロキシがあれば
+  `NODE_USE_ENV_PROXY=1` も付ける。**install はプロキシが設定されたシェルで実行すること。**
+- `check` を、env ファイルだけの環境（サービスと同じ）で実行するようにした。シェルにしかない設定のおかげで通ってしまうことがなくなる。
+  プロキシ変数の名前と、Slack のソケット用ホストに届くかも表示する。
+
+コンテナで確かめたこと（systemd の system サービス、root、`HOME=/home/hatch`、直接の :443 は平文を返し、プロキシだけが外に出られる）:
+古いキットは VM と同じエラーで失敗し、新しいキットでは Slack・ソケットのホスト・モデル・フォールバック・カタログがすべてプロキシ経由で通った。
+
+```text
+<@U0CCCH69XMW> 原因が分かったので直しました。ボットのサービスにあなたのシェルのプロキシ設定が渡っておらず、opencode が外へ直接つなごうとして失敗していました。次をお願いします（ブリッジはまだ起動しないでください）。
+
+1. cd ~/opencode-slack-channel && git pull --ff-only
+2. ~/opencode-slack-channel/deploy/linux/setup.sh install --reconfigure
+   （プロキシの環境変数が入っている、いつものシェルで実行してください。その値をボットの環境ファイルに写します。値は表示されません）
+3. ~/opencode-slack-channel/deploy/linux/setup.sh check
+
+2 の出力の最後の 10 行と、3 の出力をそのまま返信してください。
 ```
 
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
