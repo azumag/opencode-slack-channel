@@ -290,18 +290,30 @@ export function createBridge({ config, slack, opencode, logger, now = () => Date
     }
   }
 
+  /** Slack mention prefix: the triggering sender followed by configured CC IDs. */
+  function replyPrefix(mentionTarget) {
+    const ids = []
+    if (mentionTarget !== undefined) ids.push(mentionTarget)
+    for (const id of config.ccUserIds) {
+      if (!ids.includes(id)) ids.push(id)
+    }
+    return ids.length > 0 ? ids.map((id) => '<@' + id + '>').join(' ') + ' ' : ''
+  }
+
   /** A control/notice message in a thread. */
   function notice(channel, threadTs, text) {
-    return post(channel, threadTs, toSlackMrkdwn(text, mrkdwnOptions))
+    return post(channel, threadTs, replyPrefix(undefined) + toSlackMrkdwn(text, mrkdwnOptions))
   }
 
   /** The agent's reply: formatted, split, the first chunk mentioning the sender. */
   async function sendReply(record, text, mentionTarget) {
     let first = true
+    const prefix = replyPrefix(mentionTarget)
     for (const raw of splitMessage(text, config.maxReplyChars)) {
-      const prefix = first && mentionTarget !== undefined ? '<@' + mentionTarget + '> ' : ''
+      const alreadyMentioned = /^\s*<@!?[UW][A-Z0-9]+/.test(raw)
+      const lead = first && !alreadyMentioned ? prefix : ''
       first = false
-      for (const piece of splitMessage(prefix + toSlackMrkdwn(raw, mrkdwnOptions), config.maxReplyChars + 200)) {
+      for (const piece of splitMessage(lead + toSlackMrkdwn(raw, mrkdwnOptions), config.maxReplyChars + 200)) {
         if ((await post(record.channel, record.threadTs, piece)) === undefined) return
       }
     }
@@ -394,8 +406,7 @@ export function createBridge({ config, slack, opencode, logger, now = () => Date
 
   /** Post an already-formatted mrkdwn notice in the turn's thread, mentioning its requester. */
   async function turnNotice(record, mrkdwn) {
-    const prefix = record.mentionTarget !== undefined ? '<@' + record.mentionTarget + '> ' : ''
-    return post(record.channel, record.threadTs, prefix + mrkdwn)
+    return post(record.channel, record.threadTs, replyPrefix(record.mentionTarget) + mrkdwn)
   }
 
   async function rewriteNotice(record, ts, mrkdwn) {

@@ -30,6 +30,7 @@ const DEFAULTS = {
   allowedUserIds: [],
   allowedBotIds: [],
   mentionUserIds: [],
+  ccUserIds: [],
   replyMention: 'always',
   loopGuard: { maxEvents: 20, windowSeconds: 300, cooldownSeconds: 600 },
   // The model provider failing (rate limit, endpoint unavailable): opencode
@@ -100,6 +101,7 @@ export function resolveConfig(raw = {}) {
   config.allowedUserIds = idList(config.allowedUserIds, 'allowedUserIds', /^([UW][A-Z0-9]+|\*)$/)
   config.allowedBotIds = idList(config.allowedBotIds, 'allowedBotIds', /^[UWB][A-Z0-9]+$/)
   config.mentionUserIds = idList(config.mentionUserIds, 'mentionUserIds', /^[UW][A-Z0-9]+$/)
+  config.ccUserIds = idList(config.ccUserIds, 'ccUserIds', /^[UW][A-Z0-9]+$/)
   if (!['always', 'humans', 'off'].includes(config.replyMention)) fail('replyMention must be "always", "humans" or "off"')
   if (!['last', 'all'].includes(config.replyMode)) fail('replyMode must be "last" or "all"')
   if (config.model !== undefined && (typeof config.model?.providerID !== 'string' || typeof config.model?.id !== 'string')) fail('model must be { "providerID": "…", "id": "…" }')

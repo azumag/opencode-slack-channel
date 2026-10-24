@@ -63,6 +63,7 @@ opencode サーバーの URL とパスワードは、v2 サービスが書く `~
 | `allowedUserIds` | `[]`（誰も使えない） | 使える人。`"*"` なら全員 |
 | `allowedBotIds` | `[]` | メンションしてきたら処理する bot（ユーザー ID `U…` か bot ID `B…`） |
 | `mentionUserIds` | `[]` | エージェントが本文に書いた `<@U…>` を実メンションにしてよい ID |
+| `ccUserIds` | `[]` | 全返信の先頭に CC する user ID |
 | `replyMention` | `always` | 返信の先頭で送信者をメンションするか（`always` / `humans` / `off`。DM では付けない） |
 | `loopGuard` | 20 件 / 300 秒 → 600 秒 | bot 投稿の上限 |
 | `upstreamRetry` | `{ maxAttempts: 3, maxWaitMs: 300000 }` | モデル提供元の失敗（レート制限・endpoint unavailable など）で opencode が再試行を予約したら、スレッドに ⚠️ で知らせる（依頼者へのメンション付き。2回目以降は同じメッセージを書き換え）。次の試行の番号が `maxAttempts` に達するか（opencode は最初の再試行を 2 と数えるので、既定の 3 は「2 回失敗したら」）、次の試行まで `maxWaitMs` を超えるなら、ターンを中断して失敗として返す。0 でその条件を無効化 |
