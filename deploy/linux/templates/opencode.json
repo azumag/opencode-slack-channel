@@ -3,30 +3,6 @@
   "plugins": [
     "@OSC_HOME@/plugins/opencode-rate-limit-fallback"
   ],
-  "provider": {
-    "opencode": {
-      "name": "OpenCode Zen",
-      "models": {
-        "x-preview-f-free": {
-          "name": "Ox Alpha Free",
-          "limit": {
-            "context": 1000000,
-            "output": 131072
-          },
-          "modalities": {
-            "input": [
-              "text",
-              "image",
-              "video"
-            ],
-            "output": [
-              "text"
-            ]
-          }
-        }
-      }
-    }
-  },
   "disabled_providers": [
     "google",
     "minimax"

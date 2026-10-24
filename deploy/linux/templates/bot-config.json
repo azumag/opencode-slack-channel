@@ -32,7 +32,7 @@
   "maxReplyChars": 4000,
   "interactiveTimeoutMs": 1800000,
   "upstreamRetry": {
-    "maxAttempts": 12,
+    "maxAttempts": 0,
     "maxWaitMs": 600000
   },
   "ccUserIds": [],

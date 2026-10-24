@@ -170,6 +170,11 @@ export function loadConfig(directory, worktree, logger) {
     if (!worktree || resolve(worktree) !== resolve(directory)) {
         searchLocations.push({ dir: resolve(directory), subdir: '.opencode' });
     }
+    // OpenCode's own config directory override (opencode-slack-channel: Linux installs
+    // keep their opencode config there and leave XDG_CONFIG_HOME alone).
+    if (process.env.OPENCODE_CONFIG_DIR) {
+        searchLocations.push({ dir: resolve(process.env.OPENCODE_CONFIG_DIR), subdir: '.' });
+    }
     searchLocations.push({ dir: resolve(homedir), subdir: '.opencode' });
     searchLocations.push({ dir: resolve(xdgConfigHome), subdir: 'opencode' });
     const searchDirs = [...new Set(searchLocations.map(({ dir }) => dir))];

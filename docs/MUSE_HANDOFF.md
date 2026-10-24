@@ -65,8 +65,12 @@ check の出力をそのまま返信してください（秘密の値は出ま�
 
 - `✓ Slack bot token — bot … (U0C9Y2F2HEV)`: 同じボットのトークンが入った。
 - `✓ Slack app token — Socket Mode URL issued (not connected)`: app トークンが有効。
-- `✓ model answers — opencode/glm-5.3-flash-free, N s`: VM からモデルを呼べる。テスト用のセッションは削除される。失敗したら、
-  opencode のログ（`~/.opencode-slack/xdg/data/opencode/log/opencode.log`）の ERROR 行が `· opencode log —` として出る。
+- `✓ model answers — opencode/…, N s`: VM からモデルを呼べる（設定のモデルが一覧になければ、プラグインが選んだ別の無料モデルの名前が出る）。
+  テスト用のセッションは削除される。失敗したら、opencode のログ（`~/.opencode-slack/xdg/data/opencode/log/opencode.log`）の ERROR 行が
+  `· opencode log —` として出る。
+- `✓ model fallback — opencode/osc-check-missing-model → opencode/…`: 存在しないモデルを指定したセッションが、フォールバックプラグインで
+  別のモデルに移って答えた。プラグインが設定を読めていて、自動で選べている。
+- `· model catalog — N failed fetch(es) …`: opencode がモデル一覧（カタログ）を取れていない。そのあいだは opencode に組み込まれた古い一覧だけで動く。
 - `· GitHub CLI — logged in as …`: ボットはこのアカウントで GitHub を操作する。
 - `· git user.name — … (bot env)`: ボットのコミットの名義。未設定なら
   `setup.sh git-identity "azumag" azumag@users.noreply.github.com`（Mac のボットと同じ名義。`~/.gitconfig` は変えない）。
@@ -94,6 +98,38 @@ opencode は新しい環境で再起動する。Slack のトークンと opencod
 6. id -un; echo $HOME
 
 check の出力と 6 の結果を返信してください。
+```
+
+## 2026-10-24 (2): モデルを自動で選ぶようにした
+
+VM の opencode はモデル一覧（カタログ、`https://models.opencode.ai/api.json` を 5 分ごとに取りに行く。タイムアウト 10 秒）を取れておらず、
+opencode 2.0.31 に組み込まれた一覧だけで動いていた。そこに `glm-5.3-flash-free` がないので check が失敗した。モデル名を設定に書き足すのは
+一覧が変わるたびに直す羽目になるので、やめた。
+
+- フォールバックプラグインに `autoFallback` を足し（[vendor/README.md](../vendor/README.md)）、その時点で一覧にある無料モデルを順に試すようにした。
+  設定のモデル（`glm-5.3-flash-free`）や `fallbackModels` は優先順のヒントで、一覧から消えても飛ばすだけ。
+- **それまでの VM ではフォールバックが働いていなかった。** `XDG_CONFIG_HOME` をやめて `OPENCODE_CONFIG_DIR` にしたとき、プラグインが設定を
+  探す場所から外れていた。プラグインが `OPENCODE_CONFIG_DIR` も探すようにした。
+- チェーンの長さが一覧しだいになったので、ブリッジの `upstreamRetry.maxAttempts` を 0（回数では打ち切らない）にした。打ち切りは
+  `maxWaitMs`（次の試行まで 10 分を超えたら）に任せる。
+- 廃止された `x-preview-f-free`（試すと「Model is unavailable」）を設定から外した。
+
+カタログが取れないままだと、新しい無料モデルは出てこない（消えたモデルは自動で飛ばせる）。取れない理由は、依頼文の 4〜6 の結果を見て直す。
+
+```text
+<@U0CCCH69XMW> 修正を入れたので、次をお願いします（ブリッジはまだ起動しないでください）。
+
+1. cd ~/opencode-slack-channel && git pull --ff-only
+2. ~/opencode-slack-channel/deploy/linux/setup.sh install --reconfigure
+3. ~/opencode-slack-channel/deploy/linux/setup.sh check
+4. curl -sS -o /dev/null -w '%{http_code} %{size_download}B %{time_total}s\n' --max-time 60 https://models.opencode.ai/api.json
+   curl -sS -o /dev/null -w '%{http_code} %{size_download}B %{time_total}s\n' --max-time 60 https://models.dev/api.json
+5. 4 と同じことを、ボットのサービスと同じ環境変数で:
+   env -i bash -c 'set -a; . "$0"; set +a; curl -sS -o /dev/null -w "%{http_code} %{size_download}B %{time_total}s\n" --max-time 60 https://models.opencode.ai/api.json' ~/.opencode-slack/env
+6. env | grep -iE '^(https?|no|all)_proxy=' | cut -d= -f1
+   （プロキシの環境変数の「名前」だけ。値は貼らないでください）
+
+3〜6 の出力を返信してください。
 ```
 
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
@@ -140,11 +176,11 @@ done
 
 - **スレッドとセッションの対応は引き継がない。** 移す前からあるスレッドでメンションすると、VM で新しいセッションになる（スレッドの直近 30 件を文脈として渡すので、話の流れはある程度つながる）。
 - **作業場所は VM の `~/work`**（最初は空）。Mac の `~/work` のリポジトリは見えない。GitHub は VM で `gh` にログインしているアカウントで操作する。
-- **モデルは Zen の無料モデルだけ。** Mac は `opencode-go/deepseek-v4.1-flash`（有料）→ gemma4:12b（Mac の tailnet 内の Ollama）→
-  `x-preview-f-free` だった。VM は `glm-5.3-flash-free` → deepseek-v4.1-flash-free → mimo-v2.6-flash-free → beam-free →
-  nemotron-3.5-super-vl-free → nemotron-3-ultra-free → big-pickle → flint-40b-free → x-preview-f-free → nemotron-3.5-lightning-free
-  （10/18 に Mac で使っていた無料チェーンの順。space-bunny と longcat は一覧から消えていた。lightning は読むだけの依頼でファイルを
-  書き換えたことがあるので最後）。
+- **モデルは Zen の無料モデルだけで、自動で選ぶ。** Mac は `opencode-go/deepseek-v4.1-flash`（有料）→ gemma4:12b（Mac の tailnet 内の
+  Ollama）→ `x-preview-f-free` だった。VM は `glm-5.3-flash-free` から始め、失敗したら、その時点で一覧にある無料モデルを順に試す。
+  順番は `fallbackModels` に書いたもの（deepseek-v4.1-flash-free → mimo-v2.6-flash-free → beam-free → nemotron-3.5-super-vl-free →
+  nemotron-3-ultra-free → big-pickle → flint-40b-free → nemotron-3.5-lightning-free。10/18 に Mac で使っていた無料チェーンの順）のうち
+  一覧にあるもの、そのあとに残りの無料モデルを新しい順。
 - **`secrets-hygiene.md` を VM では instructions に入れた。** Mac では `~/.config/opencode/rules/` に置いてあるだけで、opencode.json から読まれていない。GitHub に投稿するときは `~/.opencode-slack/agent-guards/gh-comment` 経由になる。
 - **Mac のグローバルプラグイン（auto-continue / loop / fiosracht-model-sync）は入れない。** ボットのセッションで動いた記録が無く、fiosracht プロバイダはもう無い。
 - **Zen 無料モデルの日次枠は IP ごと**なので、VM は Mac と別の枠になる。

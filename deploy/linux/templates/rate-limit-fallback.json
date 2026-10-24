@@ -3,6 +3,11 @@
   "fallbackMode": "cycle",
   "cooldownMs": 60000,
   "otherModels": "wait",
+  "autoFallback": {
+    "providers": [
+      "opencode"
+    ]
+  },
   "fallbackModels": [
     {
       "providerID": "opencode",
@@ -31,10 +36,6 @@
     {
       "providerID": "opencode",
       "modelID": "flint-40b-free"
-    },
-    {
-      "providerID": "opencode",
-      "modelID": "x-preview-f-free"
     },
     {
       "providerID": "opencode",

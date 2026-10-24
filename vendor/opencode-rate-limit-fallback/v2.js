@@ -41,6 +41,27 @@ function toModelRef(model) {
     return { providerID: model.providerID, id: model.modelID };
 }
 /**
+ * Errors saying the model itself is not served (rather than busy). With
+ * autoFallback such a model is left out of chains for a while.
+ */
+const UNAVAILABLE_MODEL_PATTERNS = [
+    /model is unavailable/i,
+    /model[^.]{0,40}\bnot (found|available|supported)/i,
+    /unknown model/i,
+    /no such model/i,
+    /model[^.]{0,40}does not exist/i,
+];
+const DEFAULT_UNAVAILABLE_MS = 6 * 60 * 60 * 1000;
+function isUnavailableModelError(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const text = `${value.type ?? ""} ${value.message ?? ""}`;
+    return UNAVAILABLE_MODEL_PATTERNS.some((pattern) => pattern.test(text));
+}
+function isFree(model) {
+    return (model.cost ?? []).every((cost) => (cost.input ?? 0) === 0 && (cost.output ?? 0) === 0);
+}
+/**
  * The models a session walks through on consecutive failures: its own model,
  * then the configured fallbacks listed after it. A model that is not in
  * `fallbackModels` has no fallbacks: it is retried after a cooldown when
@@ -69,9 +90,66 @@ export default {
         const fallbacks = mode === "wait" ? [] : (config.fallbackModels ?? [])
             .filter((model) => typeof model?.providerID === "string" && typeof model?.modelID === "string")
             .map(toModelRef);
-        if (mode !== "wait" && fallbacks.length === 0 && otherModels !== "wait")
+        // autoFallback ({ providers, freeOnly, unavailableMs }; an opencode-slack-channel
+        // addition) appends every model the server lists now for those providers
+        // (only free ones unless freeOnly is false) to the configured fallbacks, so
+        // models that come and go need no config change. Configured fallbacks the
+        // server no longer lists are skipped, and so is a model that answered
+        // "unavailable" within unavailableMs (default 6 h).
+        const auto = mode !== "wait" && Array.isArray(config.autoFallback?.providers)
+            ? {
+                providers: config.autoFallback.providers,
+                freeOnly: config.autoFallback.freeOnly !== false,
+                unavailableMs: Number.isFinite(config.autoFallback.unavailableMs) ? config.autoFallback.unavailableMs : DEFAULT_UNAVAILABLE_MS,
+            }
+            : undefined;
+        if (mode !== "wait" && fallbacks.length === 0 && otherModels !== "wait" && auto === undefined)
             return;
-        const handles = (model) => mode === "wait" || otherModels === "wait" || fallbacks.some((candidate) => sameModel(candidate, model));
+        const handles = (model) => mode === "wait" || otherModels === "wait" || fallbacks.some((candidate) => sameModel(candidate, model))
+            || (auto !== undefined && model !== undefined && auto.providers.includes(model.providerID));
+        const handlesError = (error) => isRetryableError(error) || (auto !== undefined && isUnavailableModelError(error));
+        const unavailableUntil = new Map();
+        const modelKey = (model) => `${model.providerID}/${model.id}`;
+        const isUnavailable = (model) => (unavailableUntil.get(modelKey(model)) ?? 0) > Date.now();
+        const noteFailure = (model, error) => {
+            if (auto !== undefined && model !== undefined && isUnavailableModelError(error))
+                unavailableUntil.set(modelKey(model), Date.now() + auto.unavailableMs);
+        };
+        const listedModels = async () => {
+            try {
+                const result = await context.model.list();
+                return (Array.isArray(result?.data) ? result.data : [])
+                    .filter((model) => model.enabled !== false && (model.status ?? "active") === "active");
+            }
+            catch {
+                return [];
+            }
+        };
+        // A model a session may stay on: listed and not "unavailable" lately.
+        const usable = async (model) => !isUnavailable(model)
+            && (await listedModels()).some((listed) => listed.providerID === model.providerID && listed.id === model.id);
+        // Configured fallbacks the server lists, then the other listed models of
+        // autoFallback.providers, newest release first.
+        const autoFallbacks = async () => {
+            const listed = await listedModels();
+            const configured = fallbacks.filter((model) => listed.some((candidate) => candidate.providerID === model.providerID && candidate.id === model.id));
+            const extra = listed
+                .filter((model) => model.capabilities?.tools !== false && auto.providers.includes(model.providerID) && (!auto.freeOnly || isFree(model)))
+                .sort((a, b) => (b.time?.released ?? 0) - (a.time?.released ?? 0) || a.id.localeCompare(b.id))
+                .map((model) => ({ providerID: model.providerID, id: model.id }))
+                .filter((ref) => !configured.some((model) => sameModel(model, ref)));
+            return [...configured, ...extra].filter((model) => !isUnavailable(model));
+        };
+        // With autoFallback a failing model is followed by every other usable
+        // model, starting after its own place in that order and wrapping around.
+        const chainFrom = async (model) => {
+            if (auto === undefined || model === undefined)
+                return chainFor(model, fallbacks);
+            const order = await autoFallbacks();
+            const index = order.findIndex((candidate) => sameModel(candidate, model));
+            const rotated = index < 0 ? order : [...order.slice(index + 1), ...order.slice(0, index)];
+            return [model, ...rotated.filter((candidate) => !sameModel(candidate, model))];
+        };
         const cooldownMs = effectiveCooldown(config.cooldownMs);
         const resumeTimers = new Map();
         const streaks = new Map();
@@ -121,7 +199,20 @@ export default {
             const current = await currentModel(sessionID);
             if (current !== undefined && !sameModel(current, streak.selected))
                 return;
+            if (auto !== undefined && !(await usable(streak.original)))
+                return;
             await switchModel(sessionID, streak.original);
+        };
+        // Before a real prompt runs (autoFallback): a session on a model the server
+        // no longer lists, or one that answered "unavailable" lately, moves to the
+        // first usable fallback instead of failing first.
+        const leaveUnusableModel = async (sessionID) => {
+            const current = await currentModel(sessionID);
+            if (current === undefined || !auto.providers.includes(current.providerID) || (await usable(current)))
+                return;
+            const next = (await autoFallbacks()).find((candidate) => !sameModel(candidate, current));
+            if (next !== undefined)
+                await switchModel(sessionID, next);
         };
         // `failed` just failed with a retryable error: select the model for the
         // next try and say when it is due.
@@ -131,7 +222,7 @@ export default {
             if (!streak || (failed !== undefined && position < 0)) {
                 // First failure, or the model was changed by someone else mid-streak:
                 // start over from the model that just failed.
-                streak = { original: failed, chain: chainFor(failed, fallbacks), passes: streak?.passes ?? 0 };
+                streak = { original: failed, chain: await chainFrom(failed), passes: streak?.passes ?? 0 };
                 streaks.set(sessionID, streak);
                 position = 0;
             }
@@ -166,10 +257,13 @@ export default {
             streaks.delete(event.sessionID);
             if (streak)
                 await restoreModel(event.sessionID, streak);
+            if (auto !== undefined)
+                await leaveUnusableModel(event.sessionID);
         });
         const retryRegistration = await context.session.hook("retry", async (event) => {
-            if (!isRetryableError(event.error) || !handles(event.model))
+            if (!handlesError(event.error) || !handles(event.model))
                 return;
+            noteFailure(event.model, event.error);
             cancelResume(event.sessionID);
             event.decision = await decide(event.sessionID, event.model);
         });
@@ -189,11 +283,12 @@ export default {
             if (event.type !== "session.execution.failed")
                 return;
             const streak = streaks.get(sessionID);
-            if (!streak || !isRetryableError(event.data?.error))
+            if (!streak || !handlesError(event.data?.error))
                 return;
             const failed = (await currentModel(sessionID)) ?? streak.selected ?? streak.original;
             if (!handles(failed))
                 return;
+            noteFailure(failed, event.data?.error);
             const decision = await decide(sessionID, failed);
             if (decision.retry)
                 scheduleResume(sessionID, decision.delay);

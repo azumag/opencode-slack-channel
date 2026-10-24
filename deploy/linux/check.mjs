@@ -63,12 +63,31 @@ async function waitForModel(bin, model) {
   return -1
 }
 
-/** One tiny turn through the same API the bridge uses; the session is deleted afterwards. */
-async function probeModel(opencode, config, logFile) {
+/**
+ * The catalog opencode refreshes every 5 min from https://models.opencode.ai/api.json (10 s
+ * timeout). While that fails, the server only has the model list built into its version.
+ */
+function catalogNote(logFile) {
+  if (!logFile || !existsSync(logFile)) return
+  const since = Date.now() - 30 * 60000
+  const failures = readFileSync(logFile, 'utf8').split('\n').filter((line) => line.includes('Failed to fetch models.dev')
+    && Date.parse(line.match(/timestamp=(\S+)/)?.[1] ?? '') >= since)
+  if (failures.length === 0) return note('model catalog', 'no fetch failures in the last 30 min')
+  const cause = failures.at(-1).match(/cause="([^"\\]*)/)?.[1] ?? '?'
+  note('model catalog', failures.length + ' failed fetch(es) of https://models.opencode.ai/api.json in the last 30 min (' + cause.slice(0, 120)
+    + ') — the server only knows the models built into this opencode version; new free models will not appear')
+}
+
+/**
+ * One tiny turn through the same API the bridge uses; the session is deleted afterwards.
+ * `expectSwitch`: the model is one the server does not have, so passing means the fallback
+ * plugin moved the session to another model.
+ */
+async function probeModel(opencode, config, logFile, { label = 'model answers', model = config.model, expectSwitch = false } = {}) {
   const started = Date.now()
   const logFrom = logFile && existsSync(logFile) ? statSync(logFile).size : 0
   const body = { location: { directory: config.cwd }, metadata: { source: 'osc-check' } }
-  if (config.model) body.model = config.model
+  if (model) body.model = model
   const session = await opencode.createSession(body)
   try {
     await opencode.prompt(session.id, 'Reply with exactly the word OK and nothing else. Do not use any tools.')
@@ -90,10 +109,11 @@ async function probeModel(opencode, config, logFile) {
     const text = (last?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join(' ').trim()
     const used = last?.model ? last.model.providerID + '/' + last.model.id : '?'
     const secs = Math.round((Date.now() - started) / 1000)
-    if (/\bOK\b/.test(text)) ok('model answers', used + ', ' + secs + ' s')
-    else if (!last) bad('model answers', 'no reply after ' + secs + ' s')
-    else bad('model answers', used + ' replied "' + text.slice(0, 80) + '" (finish ' + (last.finish ?? 'none') + ')')
-    if (!/\bOK\b/.test(text)) {
+    const answered = /\bOK\b/.test(text) && !(expectSwitch && used === model.providerID + '/' + model.id)
+    if (answered) ok(label, (expectSwitch ? model.providerID + '/' + model.id + ' → ' : '') + used + ', ' + secs + ' s')
+    else if (!last) bad(label, 'no reply after ' + secs + ' s')
+    else bad(label, used + ' replied "' + text.slice(0, 80) + '" (finish ' + (last.finish ?? 'none') + ')')
+    if (!answered) {
       const errors = logErrors(logFile, logFrom)
       if (errors.length === 0) note('opencode log', 'no ERROR lines in ' + logFile)
       for (const line of errors.slice(-3)) note('opencode log', line)
@@ -189,12 +209,19 @@ for (const [key, envName] of [['user.name', 'GIT_AUTHOR_NAME'], ['user.email', '
 if (opts.model && opencode && config) {
   try {
     const waited = config.model ? await waitForModel(opts['opencode-bin'], config.model) : 0
-    if (waited < 0) throw new Error(config.model.providerID + '/' + config.model.id + ' is not in the server\'s model list after 60 s (opencode2 models)')
+    if (waited < 0) note('model list', config.model.providerID + '/' + config.model.id + ' is not listed by the server (opencode2 models); the fallback plugin should move sessions to another free model')
     if (waited > 0) note('model list', 'the model appeared after ' + waited + ' s (fresh server)')
     await probeModel(opencode, config, opts['opencode-log'])
   } catch (error) {
     bad('model answers', errText(error))
   }
+  try {
+    await probeModel(opencode, config, opts['opencode-log'], { label: 'model fallback', model: { providerID: 'opencode', id: 'osc-check-missing-model' }, expectSwitch: true })
+  } catch (error) {
+    bad('model fallback', errText(error))
+  }
+  // After the probes: a fresh server first fetches the catalog when a model is first needed.
+  catalogNote(opts['opencode-log'])
 } else if (opts.model) {
   note('model answers', 'skipped (opencode server or bot config not OK)')
 }
