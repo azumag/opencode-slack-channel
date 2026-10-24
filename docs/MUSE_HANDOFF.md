@@ -393,6 +393,16 @@ Claude キットとの違いは、プロキシの写しを直接試すこと（c
 2〜5 の出力と、登録した cron ジョブの名前・間隔を返信してください。ボットを止めたいときは setup.sh stop を使ってください（stop すると start-saved は何もしなくなるので、cron はそのままで構いません）。
 ```
 
+## 2026-10-25: (8) の結果（Muse の報告）
+
+- `uptime -s` は 2026-10-25 00:31:51（JST）、`/etc/systemd/system` に opencode-slack の unit は無かった → (7) の import で
+  サーバーが落ちていたのは VM の作り直しのため、で確定。
+- install でサービス定義を作り直し、opencode サーバーが起動。check は **全項目合格**:
+  OpenCode Go の `deepseek-v4.1-flash` が VM から 3 秒で応答、存在しないモデルからの切り替えも `glm-5.3-flash` へ 4 秒、
+  Slack の 2 つのトークンとソケットのホスト、gh（azumag）も OK、サーバーは `OPENCODE_API_KEY` を見ている。
+- `start-saved` の手動実行は `not wanted`（切り替え前なので正しい）。Muse の cron ジョブ `opencode-bot-autorecover`（10 分ごと）を登録済み。
+- 残りは依頼文 3（切り替え）だけ。Mac 側のブリッジと v2 サーバーは止まったまま（plist は `.disabled`、プロセスなし）。
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、
