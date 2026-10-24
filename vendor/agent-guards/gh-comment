@@ -1,0 +1,93 @@
+#!/bin/bash
+# gh-comment — 秘密情報スキャンを通してから GitHub へコメントする薄いラッパー。
+#
+# 使い方: gh-comment pr|issue <number> --body-file <path> [gh への追加引数]
+#
+# 実行環境について:
+#   - shebang は /bin/bash（macOS 同梱の bash 3.2）。homebrew の bash は
+#     dylib 欠落で起動即 abort する環境があるため使わない。
+#   - python3 は /usr/bin/python3（system Python、framework 依存が少ない）を優先する。
+#     homebrew の python3 が sandbox や framework 欠落で落ちる環境があるため。
+#
+# exit code:
+#   0 = スキャン通過（gh の終了コードをそのまま返す）
+#   1 = 秘密情報を検出して投稿中止
+#   2 = 使い方・IO エラー
+#   3 = スキャナ/実行環境の異常（fail-closed で投稿中止。検出とは区別する）
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+pick_python() {
+  local cand
+  for cand in /usr/bin/python3 /usr/local/bin/python3 "$(command -v python3 2>/dev/null)"; do
+    [ -n "$cand" ] || continue
+    [ -x "$cand" ] || continue
+    if "$cand" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! PY=$(pick_python); then
+  echo "gh-comment: 使用可能な python3 (3.8+) が見つかりません。投稿を中止しました。" >&2
+  exit 3
+fi
+
+if [ "$#" -lt 2 ]; then
+  echo "usage: gh-comment pr|issue <number> --body-file <path> [gh args...]" >&2
+  exit 2
+fi
+
+kind=$1
+number=$2
+shift 2
+
+body=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[i]}" in
+    --body-file | -F) body=${args[i + 1]:-} ;;
+  esac
+done
+
+if [ -z "$body" ]; then
+  echo "gh-comment: --body-file が必要です（インライン --body は使いません）" >&2
+  exit 2
+fi
+
+if [ ! -f "$body" ]; then
+  echo "gh-comment: 本文ファイルが見つかりません: $body" >&2
+  exit 2
+fi
+
+set +e
+"$PY" "$here/secret_scan.py" "$body"
+scan_rc=$?
+set -e
+
+case "$scan_rc" in
+  0) ;;
+  1)
+    echo "gh-comment: 秘密情報らしき文字列を検出したため投稿を中止しました。" >&2
+    echo "  1) 実値を合成値（例: gho_ + ダミー36文字）へ置き換える" >&2
+    echo "  2) コマンド出力は貼らず、要点だけを要約して書く" >&2
+    exit 1
+    ;;
+  *)
+    echo "gh-comment: スキャナが異常終了しました (exit $scan_rc)。" >&2
+    echo "  これは「秘密情報の検出」ではありません。投稿は中止しました（fail-closed）。" >&2
+    echo "  確認: $PY $here/secret_scan.py --help" >&2
+    exit 3
+    ;;
+esac
+
+case "$kind" in
+  pr | issue) exec gh "$kind" comment "$number" "${args[@]}" ;;
+  *)
+    echo "gh-comment: kind は pr か issue を指定してください: $kind" >&2
+    exit 2
+    ;;
+esac

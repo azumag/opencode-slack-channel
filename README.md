@@ -50,6 +50,22 @@ DM、ボットが作業中のスレッド、またはメンション付きで使
 
 opencode サーバーの URL とパスワードは、v2 サービスが書く `~/.local/state/opencode/service.json` から毎回読む（Basic 認証、ユーザー名 `opencode`）。サービスを再起動してパスワードが変わっても追従する。
 
+### Linux（clone してスクリプト 1 本）
+
+```sh
+git clone https://github.com/azumag/opencode-slack-channel.git ~/opencode-slack-channel
+~/opencode-slack-channel/deploy/linux/setup.sh install   # Node・opencode CLI・設定・サービス。Slack にはまだつながない
+~/opencode-slack-channel/deploy/linux/setup.sh keygen    # トークン受け渡し用の公開鍵（osc-pub1:…）を出す
+~/opencode-slack-channel/deploy/linux/setup.sh import 'osc-sealed1:…'
+~/opencode-slack-channel/deploy/linux/setup.sh check
+~/opencode-slack-channel/deploy/linux/setup.sh start --cutover   # 旧ボットを止めてから
+```
+
+- sudo 不要。Node ≥ 22 が無ければ公式 tarball を検証して入れる。opencode は専用の XDG ディレクトリ（`~/.opencode-slack/xdg`）で動かすので、その機械の `~/.config/opencode` には触れない。
+- systemd のユーザーサービス（root なら system サービス）で常駐する。systemd が無ければバックグラウンドのループで動かし、再起動後の復帰用の crontab 行を表示する。
+- トークンは平文で運ばない。移設先が作った公開鍵に向けて、元の機械で `node deploy/secrets.mjs seal` で暗号化した 1 行を渡す。
+- 別の人（アシスタント）に頼んで移すときの手順と依頼文は [docs/MUSE_HANDOFF.md](docs/MUSE_HANDOFF.md)。
+
 ## 設定項目
 
 | キー | 既定 | 意味 |

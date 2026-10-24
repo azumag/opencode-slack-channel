@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "fallbackMode": "cycle",
+  "cooldownMs": 60000,
+  "otherModels": "wait",
+  "fallbackModels": [
+    {
+      "providerID": "opencode",
+      "modelID": "x-preview-f-free"
+    }
+  ]
+}

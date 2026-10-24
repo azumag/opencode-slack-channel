@@ -1,0 +1,42 @@
+{
+  "model": {
+    "providerID": "opencode-go",
+    "id": "deepseek-v4.1-flash"
+  },
+  "cwd": "~/work",
+  "channelCwd": {},
+  "allowedChannelIds": [
+    "C0C8YJTC147"
+  ],
+  "allowDirectMessages": true,
+  "allowedUserIds": [
+    "UCR3WAE2J"
+  ],
+  "allowedBotIds": [
+    "U0C7AN52QGN",
+    "U0CCCH69XMW"
+  ],
+  "mentionUserIds": [
+    "U0C7AN52QGN",
+    "U0CCCH69XMW"
+  ],
+  "replyMention": "always",
+  "loopGuard": {
+    "maxEvents": 20,
+    "windowSeconds": 300,
+    "cooldownSeconds": 600
+  },
+  "threadContextMessages": 30,
+  "channelContextMessages": 10,
+  "replyMode": "last",
+  "maxReplyChars": 4000,
+  "interactiveTimeoutMs": 1800000,
+  "upstreamRetry": {
+    "maxAttempts": 12,
+    "maxWaitMs": 600000
+  },
+  "ccUserIds": [],
+  "opencode": {
+    "serviceFile": "@OSC_HOME@/xdg/state/opencode/service.json"
+  }
+}
