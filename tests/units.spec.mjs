@@ -7,6 +7,7 @@ import { createLoopGuard } from '../src/guard.js'
 import { parseSse } from '../src/opencode.js'
 import { buildInstructions, composePrompt, contextBlock, inert, senderLabel, stripSelfMention } from '../src/prompt.js'
 import { SlackClient } from '../src/slack.js'
+import { runSocketLoop } from '../src/socket.js'
 import { createStore } from '../src/store.js'
 import { assert, equal, pagedRepliesApi, test } from './_util.mjs'
 
@@ -270,4 +271,23 @@ test('config: retry and stall limits default and validate', () => {
   let threw = false
   try { resolveConfig({ stall: { noticeMs: -1 } }) } catch { threw = true }
   assert(threw, 'negative stall rejected')
+})
+
+test('socket: the hello frame logs "socket connected" with num_connections', async () => {
+  const lines = []
+  const abort = new AbortController()
+  const listeners = {}
+  const ws = {
+    addEventListener: (type, fn) => { (listeners[type] ??= []).push(fn) },
+    send: () => {},
+    close: () => { for (const fn of listeners.close ?? []) fn() },
+  }
+  const logger = { info: (m) => { lines.push(m); abort.abort() }, warn: (m) => lines.push('warn ' + m) }
+  const slack = { openConnections: async () => ({ url: 'wss://socket.test' }) }
+  const wsFactory = async () => {
+    setTimeout(() => { for (const fn of listeners.message) fn({ data: JSON.stringify({ type: 'hello', num_connections: 1 }) }) }, 0)
+    return ws
+  }
+  await runSocketLoop({ slack, onEvent: () => {}, signal: abort.signal, logger, retryDelayMs: 1, wsFactory })
+  equal(lines, ['socket connected (num_connections=1)'])
 })

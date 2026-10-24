@@ -10,9 +10,12 @@
 #   deploy/linux/setup.sh zen-logout         remove opencode's stored OpenCode Console login(s)
 #   deploy/linux/setup.sh netcheck           compare this shell's proxy settings with the env file's and try
 #                                            each against Slack/GitHub (names and status codes only)
+#   deploy/linux/setup.sh net-refresh        copy this shell's proxy settings into the env file again (+ restart)
 #   deploy/linux/setup.sh check [--no-model] verify everything without connecting to Slack's socket
 #   deploy/linux/setup.sh git-identity "<name>" <email>   who the bot's commits are by (not ~/.gitconfig)
 #   deploy/linux/setup.sh start --cutover    start the Slack bridge (only once the old bot is stopped)
+#   deploy/linux/setup.sh start-saved        bring a started bot back when it is down (machine re-created) or its
+#                                            proxy copy is refused; does nothing otherwise — for cron
 #   deploy/linux/setup.sh stop [--all]       stop the bridge (--all: the opencode server too)
 #   deploy/linux/setup.sh status | logs [bridge|opencode] | uninstall
 #
@@ -233,7 +236,7 @@ manual_start() { # name final-exit-code command… (the loop gives up when the c
   mkdir -p "$LOG_DIR"
   # setsid: own process group, so stop can take the restart loop and its child together.
   setsid bash -c 'final=$1; shift; while :; do "$@"; rc=$?; [ "$rc" = "$final" ] && { echo "$(date -u +%FT%TZ) exited with $rc; not restarting"; exit "$rc"; }; echo "$(date -u +%FT%TZ) exited with $rc; restarting in 10s"; sleep 10; done' \
-    _ "$final" "$@" >> "$LOG_DIR/$name.log" 2>&1 < /dev/null &
+    _ "$final" "$@" >> "$LOG_DIR/$name.log" 2>&1 < /dev/null 9>&- &
   echo $! > "$(pidfile "$name")"
   say "started $name (pid $!, log $LOG_DIR/$name.log)"
 }
@@ -258,7 +261,14 @@ service_start() { # opencode|bridge
       load_env
       if [ "$1" = opencode ]; then manual_start "$unit" none "$OC_BIN" serve --service
       else manual_start "$unit" 2 "$OSC_NODE" "$REPO_DIR/bin/opencode-slack-channel.js"; fi ;;
-    *) sctl enable --now "$unit.service"; say "enabled + started $unit" ;;
+    *)
+      # A machine re-created from its image keeps $OSC_HOME but not the units (Muse's VM: only /home survives).
+      if [ ! -f "$(unit_dir)/$unit.service" ]; then
+        local node; node="$(env_get OSC_NODE)"
+        [ -x "$node" ] || die "node ($node) is gone — run: $SELF install"
+        write_units "$(supervisor)" "$node"
+      fi
+      sctl enable --now "$unit.service"; say "enabled + started $unit" ;;
   esac
 }
 
@@ -277,6 +287,13 @@ service_restart_opencode() {
   esac
 }
 
+service_restart_bridge() {
+  case "$(supervisor)" in
+    manual) manual_stop "$UNIT_BRIDGE"; service_start bridge ;;
+    *) sctl restart "$UNIT_BRIDGE.service"; say "restarted $UNIT_BRIDGE" ;;
+  esac
+}
+
 wait_for_opencode() {
   local _
   for _ in $(seq 1 30); do
@@ -284,6 +301,64 @@ wait_for_opencode() {
     sleep 2
   done
   return 1
+}
+
+unit_dir() { if [ "$(supervisor)" = system ]; then echo /etc/systemd/system; else echo "$HOME/.config/systemd/user"; fi; }
+
+# One start / stop / start-saved at a time: a cron run and a person can overlap, and a stop must not be
+# undone by a start-saved that read bridge-wanted just before it was removed. fd 9 is closed for the
+# services themselves (manual_start), so the lock never outlives this script.
+lock_kit() { # seconds to wait
+  exec 9> "$OSC_HOME/.lock"
+  command -v flock >/dev/null 2>&1 || return 0
+  flock -w "$1" 9
+}
+
+# One value of the env file, without sourcing it (that would replace this shell's proxy settings).
+env_get() { sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 | sed 's/^"//; s/"$//'; }
+
+shell_has_net() { local name; for name in $NET_VARS; do [ -n "${!name:-}" ] && return 0; done; return 1; }
+
+env_has_proxy() { grep -qE '^(https?_proxy|all_proxy|HTTPS?_PROXY|ALL_PROXY)=' "$ENV_FILE"; }
+
+# Each Slack connection attempt of the bridge ends in one of these log lines, as "<ts> <what>" (only those
+# logged at or after $1, an ISO time, when given).
+socket_lines() {
+  LINES_N=400 cmd_logs bridge 2>/dev/null |
+    sed -nE 's/.*([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z) +(info|warn|error) +(socket connected|socket closed|socket connect failed|apps\.connections\.open failed|auth\.test failed).*/\1 \3/p' |
+    awk -v since="${1:-}" '$1 >= since' || true
+}
+
+# The bridge retries every few seconds, so three attempts in a row without "socket connected" = it
+# cannot reach Slack (a dead proxy copy: refused CONNECT; or Slack itself is down).
+socket_failing() {
+  local last; last="$(socket_lines | tail -n 3)"
+  [ "$(grep -c . <<<"$last")" -ge 3 ] && ! grep -q 'socket connected' <<<"$last"
+}
+
+connected_since() { grep -q 'socket connected' <<<"$(socket_lines "$1")"; }
+
+slack_probe_url() {
+  local base
+  base="$("$(env_get OSC_NODE)" -e 'try { process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).slack?.apiBase ?? "") } catch {}' "$BOT_CONFIG" 2>/dev/null || true)"
+  printf '%s/api.test\n' "${base:-https://slack.com/api}"
+}
+
+proxy_gets_through() { # proxy URL → 0 when Slack answers through it
+  [ "$(curl -s -o /dev/null --max-time 20 -x "$1" -w '%{http_code}' "$(slack_probe_url)" 2>/dev/null || true)" = 200 ]
+}
+
+# Muse's VM hands out new proxy credentials, and the copy in the env file can stop working. A running
+# bridge does not notice (its Slack socket was opened earlier) but every new connection of the opencode
+# server (the models) is refused. 0 when the copy is refused and this shell's proxy gets through, i.e.
+# when net-refresh helps.
+env_proxy_stale() {
+  command -v curl >/dev/null 2>&1 || return 1
+  local f s
+  f="$(env_get https_proxy)"; [ -n "$f" ] || f="$(env_get HTTPS_PROXY)"
+  s="${https_proxy:-${HTTPS_PROXY:-}}"
+  [ -n "$f" ] && [ -n "$s" ] && [ "$f" != "$s" ] || return 1
+  ! proxy_gets_through "$f" && proxy_gets_through "$s"
 }
 
 # ---------------------------------------------------------------- commands
@@ -372,7 +447,7 @@ EOF
     fi
   else
     say "no usable systemd: services run as background loops (logs in $LOG_DIR). They do NOT start again after a"
-    say "reboot by themselves — add to crontab:  @reboot $SELF start-saved"
+    say "reboot by themselves — add to crontab:  */10 * * * * $SELF start-saved"
   fi
   if opencode_running && ! bridge_running; then
     service_restart_opencode
@@ -413,6 +488,31 @@ cmd_import() {
     wait_for_opencode || die "opencode did not come back after the restart"
     say "opencode restarted with the API key"
   fi
+}
+
+# Copy this shell's proxy settings into the env file again (the copy install made can stop working:
+# Muse's VM hands out new proxy credentials) and restart what runs, so that it picks them up.
+cmd_net_refresh() {
+  [ -f "$ENV_FILE" ] || die "$ENV_FILE not found — run: $SELF install"
+  local tmp="$ENV_FILE.tmp" pattern
+  if ! shell_has_net && env_has_proxy; then
+    die "this shell has no proxy settings but $ENV_FILE has some — run this from the shell whose proxy works"
+  fi
+  pattern="^($(printf '%s|' $NET_VARS | sed 's/|$//'))="
+  : > "$tmp"; chmod 600 "$tmp"
+  grep -vE "$pattern" "$ENV_FILE" >> "$tmp" || true
+  write_net_env "$tmp"
+  mv "$tmp" "$ENV_FILE"
+  if [ "${#NET_NAMES[@]}" -gt 0 ]; then say "network settings taken from this shell (values not shown): ${NET_NAMES[*]}"
+  else say "no proxy settings in this shell or the env file: direct connections"; fi
+  load_env
+  if opencode_running; then
+    service_restart_opencode
+    wait_for_opencode || die "opencode did not come back after the restart — see: $SELF logs opencode"
+    say "restarted opencode"
+  fi
+  if bridge_running; then service_restart_bridge; fi
+  return 0
 }
 
 # Run from the shell whose proxy works: compare its proxy settings with the copy in the env file the
@@ -562,6 +662,8 @@ cmd_start() {
   [ "${1:-}" = --cutover ] || die "the old bot must be stopped first (two bridges on one Slack app split the events between them). Once it is: $SELF start --cutover"
   [ -f "$BOT_TOKENS" ] || die "no Slack tokens yet ($BOT_TOKENS) — run keygen + import first"
   load_env
+  lock_kit 120 || die "another start/stop/start-saved is running ($OSC_HOME/.lock)"
+  opencode_running || service_start opencode
   wait_for_opencode || die "opencode server is not up — $SELF logs opencode"
   service_start bridge
   echo started > "$OSC_HOME/bridge-wanted"
@@ -569,13 +671,56 @@ cmd_start() {
   cmd_logs bridge | tail -n 8
 }
 
-cmd_start_saved() { # @reboot entry for the manual supervisor
-  service_start opencode
-  [ -f "$OSC_HOME/bridge-wanted" ] && service_start bridge
-  return 0
+# For cron (every few minutes, from the shell whose proxy works) or @reboot: bring back a bot that was
+# started with start --cutover and not stopped since (bridge-wanted), using only what survives in
+# $OSC_HOME. Prints "start-saved:" lines saying what it did; exit 1 only when it tried and failed.
+#  - not wanted: nothing. A stopped bot stays stopped.
+#  - wanted, both services running, Slack connected, the proxy copy works: nothing.
+#  - wanted, a service not running (machine re-created: units gone): install again with this shell's
+#    proxy settings (configs, API key and the installed opencode version kept), then start the bridge.
+#  - wanted, running, but the env file's proxy copy is refused while this shell's gets through, or the
+#    last Slack connection attempts all failed: take this shell's proxy settings and restart both.
+cmd_start_saved() {
+  local want="$OSC_HOME/bridge-wanted" ver since why _
+  [ -d "$OSC_HOME" ] || die "start-saved: $OSC_HOME not found — run it as the user who installed the bot (HOME=$HOME)"
+  [ -f "$want" ] || { say "start-saved: not wanted (stopped, or never started with --cutover) — nothing to do"; return 0; }
+  lock_kit 5 || { say "start-saved: another start/stop/start-saved is running — nothing to do"; return 0; }
+  [ -f "$want" ] || { say "start-saved: stopped meanwhile — nothing to do"; return 0; }
+  mkdir -p "$LOG_DIR"
+  since="$(date -u +%FT%T)"
+  if bridge_running && opencode_running; then
+    if env_proxy_stale; then why="the env file's proxy settings are refused (this shell's get through)"
+    elif socket_failing; then why="the bridge cannot reach Slack (last connection attempts failed)"
+    else say "start-saved: running — nothing to do"; return 0; fi
+    shell_has_net || die "start-saved: $why and this shell has no proxy settings to give it"
+    say "start-saved: RESTARTING — $why; taking this shell's proxy settings"
+    cmd_net_refresh
+  else
+    if ! shell_has_net && env_has_proxy; then
+      say "start-saved: RECOVERING — the bot should run but does not; this shell has no proxy settings, so the env file's are kept"
+      opencode_running || service_start opencode
+      load_env
+      wait_for_opencode || die "start-saved: the opencode server did not come up — $SELF logs opencode"
+    else
+      say "start-saved: RECOVERING — the bot should run but does not; install again (configs kept, log $LOG_DIR/start-saved.log), then start"
+      ver="$(OPENCODE_CONFIG_DIR="$OC_CONFIG" XDG_DATA_HOME="$XDG_DIR/data" XDG_STATE_HOME="$XDG_DIR/state" XDG_CACHE_HOME="$XDG_DIR/cache" \
+        "$OC_BIN" --version 2>/dev/null | sed -n 's/^opencode v//p' || true)"
+      if ! OPENCODE_VERSION="${ver:-$OPENCODE_VERSION}" "$SELF" install > "$LOG_DIR/start-saved.log" 2>&1; then
+        tail -n 15 "$LOG_DIR/start-saved.log"
+        die "start-saved: install failed"
+      fi
+    fi
+    if bridge_running; then service_restart_bridge; else service_start bridge; fi
+  fi
+  for _ in $(seq 1 45); do connected_since "$since" && break; sleep 1; done
+  cmd_logs bridge | tail -n 4
+  bridge_running || die "start-saved: the bridge is not running after the start"
+  connected_since "$since" || die "start-saved: started, but not connected to Slack within 45 s"
+  say "start-saved: done — the bot is running and connected"
 }
 
 cmd_stop() {
+  [ -d "$OSC_HOME" ] && { lock_kit 120 || die "another start/stop/start-saved is running ($OSC_HOME/.lock)"; }
   service_stop bridge
   rm -f "$OSC_HOME/bridge-wanted"
   [ "${1:-}" = --all ] && service_stop opencode
@@ -589,8 +734,10 @@ cmd_status() {
       for u in "$UNIT_OPENCODE" "$UNIT_BRIDGE"; do
         if manual_running "$u"; then say "$u: running (pid $(cat "$(pidfile "$u")"))"; else say "$u: stopped"; fi
       done ;;
-    *) sctl --no-pager status "$UNIT_OPENCODE.service" "$UNIT_BRIDGE.service" 2>&1 | grep -E '^(●|○|×)|Active:' || true ;;
+    *) sctl --no-pager status "$UNIT_OPENCODE.service" "$UNIT_BRIDGE.service" 2>&1 | grep -E '^(●|○|×)|Active:|could not be found' || true ;;
   esac
+  if [ -f "$OSC_HOME/bridge-wanted" ]; then say "start-saved: brings the bot back (started with --cutover, not stopped since)"
+  else say "start-saved: does nothing (the bridge was not started with --cutover, or was stopped)"; fi
 }
 
 cmd_logs() {
@@ -605,7 +752,7 @@ cmd_logs() {
 cmd_uninstall() {
   cmd_stop --all
   if [ "$(supervisor)" != manual ]; then
-    local dir; [ "$(supervisor)" = system ] && dir=/etc/systemd/system || dir="$HOME/.config/systemd/user"
+    local dir; dir="$(unit_dir)"
     rm -f "$dir/$UNIT_OPENCODE.service" "$dir/$UNIT_BRIDGE.service"
     sctl daemon-reload
   fi
@@ -619,6 +766,7 @@ case "${1:-}" in
   git-identity) shift; cmd_git_identity "$@" ;;
   zen-logout) cmd_zen_logout ;;
   netcheck) cmd_netcheck ;;
+  net-refresh) cmd_net_refresh ;;
   check) shift; cmd_check "$@" ;;
   start) shift; cmd_start "$@" ;;
   start-saved) cmd_start_saved ;;
@@ -626,5 +774,5 @@ case "${1:-}" in
   status) cmd_status ;;
   logs) shift; cmd_logs "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

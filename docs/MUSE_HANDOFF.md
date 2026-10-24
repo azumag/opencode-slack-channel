@@ -13,6 +13,7 @@ Muse（<@U0CCCH69XMW>）にはプロンプトでしか頼めないので、VM �
 | 4 | Mac | 旧ボットを停止（同じ Slack アプリで 2 つ動くと、イベントが 2 つに振り分けられて両方おかしくなる）。**2026-10-24 に済み** |
 | 5 | Muse に依頼 | `start --cutover` |
 | 6 | Slack | ボットにメンションして返事が来るか見る |
+| 7 | Muse に依頼 | 10 分ごとの cron で `start-saved`（VM が作り直されても戻るように）。切り替えの前に入れておいてよい |
 
 ## 依頼文 1（セットアップ）
 
@@ -24,7 +25,7 @@ Muse（<@U0CCCH69XMW>）にはプロンプトでしか頼めないので、VM �
 2. セットアップ（sudo 不要。Node 22 以上が無ければ ~/.opencode-slack/node に入ります）
    ~/opencode-slack-channel/deploy/linux/setup.sh install
    - 「lingering is off」と出たら: sudo loginctl enable-linger $(id -un)（できなければ、その旨を報告）
-   - 「no usable systemd」と出たら: 表示された @reboot の行を crontab に追加
+   - 「no usable systemd」と出たら: 表示された start-saved の行を crontab に追加
 3. トークン受け渡し用の鍵を作る
    ~/opencode-slack-channel/deploy/linux/setup.sh keygen
    出力された osc-pub1: で始まる 1 行を、このスレッドにそのまま返信してください（公開鍵なので貼って大丈夫です。~/.opencode-slack/handoff-key.json は秘密鍵なので VM の外に出さないでください）。
@@ -351,6 +352,47 @@ node deploy/secrets.mjs seal 'osc-pub1:…' --go-key ~/.local/share/opencode/aut
 - netcheck に足した: 環境ファイル経由とシェル経由の両方で Node の fetch と gh を試す（サービスが使うのはこちら）。
   `/etc/environment` の値がシェルと同じかどうか、設定元のファイルと環境ファイルの更新時刻も出す。
 
+## 2026-10-25 (8): VM の作り直しから自動で戻す（start-saved を Muse の cron で）
+
+わかったこと（Claude ボットの移行で Muse が調べた）: VM は予告なく作り直される（実測は 2026-10-24 15:31:51 UTC の 1 回。
+プラットフォームの説明では、ランタイムの更新はしばしば 1 時間ごとで、そのとき VM が置き換わり得る）。`/` は消える overlay で、
+残るのは `/home/hatch` だけ。`/etc/systemd/system` のサービス定義も自動起動のリンクも消え、crontab も無い。作り直しのあとも
+続くのは、Muse の cron ジョブだけ（定義は VM の外にある）。(7) の import で opencode サーバーが落ちていたのもこれ
+（install は 15:30 より前、`/etc/environment` の更新は 15:32:04。サーバーは止まるときに service.json を消す）。
+
+そこで Muse の cron で 10 分ごとに `setup.sh start-saved` を実行する。何度実行しても安全で、必要なときだけ動く:
+
+| 状態 | start-saved がすること | 出力の 1 行目 |
+|---|---|---|
+| `start --cutover` 以降に `stop` した、または一度も起動していない | 何もしない（止めたボットは生き返らせない） | `start-saved: not wanted …` |
+| 両方のサービスが動いていて、Slack につながっていて、プロキシの写しも通る | 何もしない | `start-saved: running — nothing to do` |
+| どちらかが動いていない（作り直しでサービス定義が消えた等） | install をやり直す（設定・API キー・トークン・opencode のバージョンはそのまま、プロキシ設定は実行したシェルから写し直す）→ ブリッジを起動 | `start-saved: RECOVERING …` |
+| 動いているが、環境ファイルのプロキシの写しが拒否され、シェルの設定なら通る（または直近 3 回の Slack 接続がすべて失敗） | シェルのプロキシ設定を写し直して両方を再起動 | `start-saved: RESTARTING …` |
+
+最後は `start-saved: done — the bot is running and connected`（失敗なら `error:` で始まる行、終了コード 1）。
+Claude キットとの違いは、プロキシの写しを直接試すこと（curl で Slack の `api.test`）。ブリッジの Slack 接続は前から開いたまま
+なので、写しが古くなってもブリッジのログには出ないが、opencode のモデルへの新しい接続はその時点から拒否される。
+
+```text
+<@U0CCCH69XMW> opencode ボットの続きです。VM が作り直されてもボットが自動で戻るようにしました（Claude ボットと同じ方式です）。次を順に実行して、出力を返信してください。bridge はまだ起動しないでください。
+
+1. 最新版を取得
+   cd ~/opencode-slack-channel && git pull --ff-only
+2. 確認（読むだけです）
+   uptime -s; ls /etc/systemd/system/ | grep opencode-slack || echo "opencode-slack の unit なし"
+3. サービスを作り直す（前の依頼で実行済みでも、もう一度実行して大丈夫です。設定・API キー・Slack トークンはそのまま残り、プロキシ設定はいまのシェルから写し直します）
+   ~/opencode-slack-channel/deploy/linux/setup.sh install 2>&1 | tail -n 8
+4. ~/opencode-slack-channel/deploy/linux/setup.sh check
+5. 一度手で実行（まだ切り替え前なので、何もしないはずです）
+   ~/opencode-slack-channel/deploy/linux/setup.sh start-saved
+   → 1 行目が "start-saved: not wanted" で始まることを確かめてください。
+6. あなたの cron ジョブを 1 つ追加してください: 10 分ごとに、いつものシェル（プロキシの環境変数が入っているもの）で
+   ~/opencode-slack-channel/deploy/linux/setup.sh start-saved
+   を実行する。出力が "nothing to do" を含むときは報告不要です。"RECOVERING" か "RESTARTING" を含むとき、または終了コードが 0 以外のときだけ、出力をそのまま owner に知らせてください。
+
+2〜5 の出力と、登録した cron ジョブの名前・間隔を返信してください。ボットを止めたいときは setup.sh stop を使ってください（stop すると start-saved は何もしなくなるので、cron はそのままで構いません）。
+```
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、
@@ -369,18 +411,25 @@ Mac の opencode v1 web（`ai.opencode.web`、`*:4096`）と OpenCodeGoMeter は
 ## 依頼文 3（切り替え）
 
 ```text
-<@U0CCCH69XMW> Mac 側のボットを止めました。次を実行して、出力を返信してください。
+<@U0CCCH69XMW> Mac 側のボットを止めました。次を順に実行して、出力を返信してください。
 
-~/opencode-slack-channel/deploy/linux/setup.sh start --cutover
+1. cd ~/opencode-slack-channel && git pull --ff-only
+2. ~/opencode-slack-channel/deploy/linux/setup.sh install 2>&1 | tail -n 5
+3. ~/opencode-slack-channel/deploy/linux/setup.sh start --cutover
 ```
 
-出力（ブリッジのログの末尾）に `slack identity: @… (U0C9Y2F2HEV, …)` と `running` があり、`socket connect failed` が無ければ起動はできている。ソケットの接続成功はログに出ないので、つながったかどうかは #agent-council で <@U0C9Y2F2HEV> にメンションして、返事が来るかで確かめる。
+2 の install は、VM が作り直されていた場合のサービス定義と、プロキシ設定の写しをいまのシェルから作り直すため（設定・鍵・トークンはそのまま）。
+
+出力（ブリッジのログの末尾）に `slack identity: @… (U0C9Y2F2HEV, …)` と `socket connected (num_connections=1)` があればつながっている（1 = この Slack アプリの接続はこの VM の 1 本だけ、つまり Mac 側は切れている）。そのあと #agent-council で <@U0C9Y2F2HEV> にメンションして、返事が来るかを確かめる。
 
 ## 戻すとき
 
 ```text
 <@U0CCCH69XMW> ~/opencode-slack-channel/deploy/linux/setup.sh stop を実行して、出力を返信してください。
 ```
+
+`setup.sh stop` は `bridge-wanted` も消すので、Muse の cron の `start-saved` は何もしなくなる（cron はそのままでよい）。
+`systemctl stop` やプロセスの kill で止めると、cron が 10 分以内に起動し直してしまう。
 
 そのあと Mac で（サーバーを先に。ブリッジは起動時にサーバーへつなぐ）:
 

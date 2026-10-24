@@ -1,0 +1,14 @@
+# A stand-in for Muse's VM: Ubuntu 24.04 with systemd as PID 1, a user hatch,
+# and a Node 24 at /usr/bin/node with no npm beside it (as on the VM).
+FROM ubuntu:24.04
+ARG NODE_VERSION=v24.22.1
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      systemd systemd-sysv dbus curl ca-certificates git procps iproute2 xz-utils >/dev/null \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd -m -s /bin/bash hatch \
+ && arch=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') \
+ && curl -fsSL "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-linux-$arch.tar.xz" | tar -xJ -C /tmp \
+ && cp "/tmp/node-$NODE_VERSION-linux-$arch/bin/node" /usr/bin/node && rm -rf /tmp/node-* \
+ && systemctl mask systemd-logind getty@tty1 console-getty >/dev/null 2>&1 || true
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

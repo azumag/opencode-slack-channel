@@ -40,8 +40,9 @@ const scrub = (text) => String(text ?? '').split('\n').find((line) => line.trim(
   .replace(/\S+@\S+/g, '<…>').replace(/\b[\w.-]+:\d{2,5}\b/g, '<host:port>').slice(0, 160) ?? ''
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function slackCall(method, token) {
-  const res = await fetch('https://slack.com/api/' + method, { method: 'POST', headers: { authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(20000) })
+// The same Slack API base the bridge uses (bot config slack.apiBase, normally https://slack.com/api).
+async function slackCall(apiBase, method, token) {
+  const res = await fetch(apiBase + '/' + method, { method: 'POST', headers: { authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(20000) })
   return res.json()
 }
 
@@ -198,7 +199,9 @@ if (config) {
     const active = await opencode.activeSessionIds()
     note('active sessions', String(active.size))
   } catch (error) {
-    bad('opencode server', errText(error))
+    // No service.json: the server is not running. On Muse's VM that is what a re-created machine looks like
+    // (only /home survives, the systemd units are gone).
+    bad('opencode server', error?.code === 'ENOENT' ? 'not running (no ' + config.opencode.serviceFile + ') — start it again with: setup.sh install' : errText(error))
     opencode = undefined
   }
 }
@@ -225,16 +228,17 @@ if (modelProvider && Object.hasOwn(OPENCODE_INTEGRATIONS, modelProvider)) {
 if (config) {
   try {
     const tokens = loadTokens(config)
-    const auth = await slackCall('auth.test', tokens.botToken)
+    const auth = await slackCall(config.slack.apiBase, 'auth.test', tokens.botToken)
     if (auth.ok) ok('Slack bot token', 'bot ' + auth.user + ' (' + auth.user_id + ') in ' + auth.team)
     else bad('Slack bot token', 'auth.test: ' + auth.error)
-    const conn = await slackCall('apps.connections.open', tokens.appToken)
+    const conn = await slackCall(config.slack.apiBase, 'apps.connections.open', tokens.appToken)
     if (conn.ok) ok('Slack app token', 'Socket Mode URL issued (not connected)')
     else bad('Slack app token', 'apps.connections.open: ' + conn.error)
     // The socket's host over plain HTTPS, by the same route a WebSocket takes (no session, no ticket).
-    const socketHost = conn.ok ? new URL(conn.url).host : 'wss-primary.slack.com'
+    const socketUrl = new URL(conn.ok ? conn.url : 'wss://wss-primary.slack.com/')
+    const socketHost = socketUrl.host
     try {
-      const res = await fetch('https://' + socketHost + '/', { signal: AbortSignal.timeout(20000) })
+      const res = await fetch((socketUrl.protocol === 'ws:' ? 'http://' : 'https://') + socketHost + '/', { signal: AbortSignal.timeout(20000) })
       ok('Slack socket host', socketHost + ' reachable (HTTP ' + res.status + ')')
     } catch (error) {
       bad('Slack socket host', socketHost + ': ' + errText(error))

@@ -78,6 +78,11 @@ export async function runSocketLoop({ slack, onEvent, onInteractive, signal, log
             logger.warn('event handling failed: ' + errorText(error))
           }
         }
+      } else if (envelope.type === 'hello') {
+        // num_connections counts every socket of this app, so after a move
+        // to another machine 1 proves the old host is no longer connected.
+        // setup.sh start-saved also reads this line to see the bridge is up.
+        logger.info('socket connected (num_connections=' + envelope.num_connections + ')')
       } else if (envelope.type === 'interactive') {
         // Block Kit clicks arrive as their own envelope type. The ack above is
         // already sent; the handler is async (it answers a pending prompt and
@@ -91,7 +96,7 @@ export async function runSocketLoop({ slack, onEvent, onInteractive, signal, log
           }
         }
       }
-      // hello, disconnect_reason and unknown types need nothing here; the
+      // disconnect_reason and unknown types need nothing here; the
       // close handler below drives reconnection.
     })
     ws.addEventListener('close', () => closed.resolve())
