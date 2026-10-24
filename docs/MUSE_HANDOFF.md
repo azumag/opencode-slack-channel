@@ -407,7 +407,8 @@ Claude キットとの違いは、プロキシの写しを直接試すこと（c
 
 owner の OK を受けて Muse が実行。01:32:48（VM の時刻）にブリッジが起動し、`slack identity: @opencode (U0C9Y2F2HEV, bot B0C9ZRNQZV2)`、
 `running`、01:32:50 に `socket connected (num_connections=1)`（この Slack アプリの接続は VM の 1 本だけ）。Muse の cron
-`opencode-bot-autorecover` は、この時点から `bridge-wanted` を見て動く。
+`opencode-bot-autorecover` は、この時点から `bridge-wanted` を見て動く。owner が #agent-council でメンションし、VM のボットから
+返事が来ることを確認した（移行完了）。Mac のブリッジと v2 サーバーの plist は、戻すときのために `.disabled` のまま残してある。
 
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
