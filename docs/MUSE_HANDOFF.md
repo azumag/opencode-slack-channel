@@ -528,6 +528,28 @@ cron ジョブ opencode-bot-autorecover はそのままにしてください。�
 - 追加の依頼（`uptime -s`、認証情報なし／誤りの CONNECT）の答え。
 - 修正後の版での、作り直しからの自動復旧（RECOVERING の行に `proxy settings from /etc/environment` が出るか）。
 
+## 2026-10-25: 5 つのボットの自動復旧ジョブを 1 つにまとめる（owner の依頼）
+
+03:35:47 の VM の作り直しでは、各ボットの 10 分ごとのジョブが DSH・Claude・Hermes・Cline を 03:40〜03:45 に戻した。
+このジョブは作り直しから戻す唯一の手段なので止めない。ただ、ボットごとに 1 つずつで Muse の負担が 5 倍になっているので、
+1 つにまとめる。まとめたコマンドは 5 つの `start-saved` を順に実行し、1 つが失敗しても残りを続け、最後の終了コードで
+失敗の有無を返す（`bash -c` の中で `exit` するので、Muse のシェルは閉じない。偽のキット 5 つで試験済み）。
+作り直しの直後は 5 つを順に入れ直すので、合わせて 10 分ほどかかることがある（DSH は接続待ちが最長 120 秒、Hermes は 90 秒）。
+
+```text
+<@U0CCCH69XMW> ボットの自動復旧の定期ジョブを 1 つにまとめたいです。いまは 5 つのボット（opencode・Claude・Hermes・Cline・DSH）ごとに 10 分おきのジョブがあり、あなたの負担が 5 倍になっています。03:35 の VM の作り直しでは、このジョブが DSH・Claude・Hermes・Cline を 5〜10 分で戻してくれたので、止めずに 1 つにします。次を順に行って、出力を返信してください。
+
+1. いまの定期ジョブの一覧（名前と間隔）を見せてください。自動復旧のものは opencode-bot-autorecover・claude-bot-autorecover・hermes-bot-autorecover・cline-bot-autorecover・dsh-bot-autorecover の 5 つのはずです（名前が違えば教えてください）。
+2. まとめたコマンドを一度手で実行してください（動いているボットには何もしません。止まっているボットだけを戻します）:
+   bash -c 'rc=0; for k in opencode-slack-channel claude-slack-channel hermes-vm-kit cline-slack-kit dsh-slack-channel; do echo "== $k"; "$HOME/$k/deploy/linux/setup.sh" start-saved 2>&1; c=$?; echo "== $k exit $c"; [ "$c" = 0 ] || rc=1; done; exit $rc'
+   → 5 つとも "nothing to do" を含み、"exit 0" で終わることを確かめてください。
+3. 2 が問題なければ、新しい定期ジョブを 1 つ登録してください。名前は bots-autorecover、10 分ごと、いつものシェル（プロキシの環境変数が入っているもの。HOME は /home/hatch）で 2 のコマンドを実行します。報告の条件は次のとおりです。出力に "RECOVERING"・"RESTARTING"・"error" のどれかが入ったとき、または最後の終了コードが 0 以外のときだけ、そのボットの部分（"== 名前" から "== 名前 exit N" まで）をそのまま owner に知らせてください。それ以外は報告不要です。
+4. 3 を登録したあとで、1 の古い 5 つのジョブを削除してください（新しいジョブを先に入れるので、空白の時間はできません）。
+5. 定期ジョブの一覧をもう一度見せてください。
+
+2 の出力全部と、5 の一覧を返信してください。定期ジョブに実行時間の上限があれば、それも教えてください（VM の作り直しの直後は 5 つを順に入れ直すので、合わせて 10 分ほどかかることがあります）。2 で "nothing to do" 以外が出たり、exit が 0 でなかったりしたら、3・4 には進まずに、そこで返信してください。ボットを止めたいときは、これまでどおりそのボットの setup.sh stop を使ってください（止めたボットには、まとめたジョブも何もしません）。
+```
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、
