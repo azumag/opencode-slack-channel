@@ -264,6 +264,36 @@ Mac と同じ鍵を使うと、VM 側だけを止めたいときも鍵ごと無�
 両方の出力を返信してください。
 ```
 
+## 2026-10-24 (6): API キーでも上限のまま／import の直後に Slack と gh が失敗する
+
+依頼文 (5) の結果: import は成功し、check も鍵を認識した（`Zen API key set in the bot env`、Console のログインなし）。それでも
+glm-5.3-flash-free は `Free usage limit reached` のまま。あわせて `✗ Slack tokens — fetch failed (0)` と gh の失敗が出た
+（22:42 の check では両方通っていた。(4) のときも、ログインの直後に同じ失敗が出て、install のやり直しで戻った）。
+
+モデル（Mac で確かめたこと）:
+- 偽の鍵を入れると、無料モデルの呼び出しが `Reconnect OpenCode Console to continue` で失敗する。つまり opencode は無料モデルにも鍵を送り、Zen は鍵を確かめている。
+- VM の本物の鍵では、鍵の問題ではなく無料枠の上限で弾かれた。同じ鍵は Mac からなら通る。
+- ここから、無料枠の上限は鍵では外れず、VM の出口（プロキシ）に結びついていると考えられる。ただし、VM の opencode サーバーが鍵を
+  読み込んでいたことまでは確かめていない（鍵なしでも同じ答えになるため）。check に、サーバーが `OPENCODE_API_KEY` を見ているかの行を足した。
+
+Slack と gh:
+- `fetch failed (0)` は、プロキシが CONNECT に 200 以外（407 や 403）で答えたときに Node 24 が出すものだった（偽のプロキシで再現。
+  プロキシにつながらないときは `ECONNREFUSED` になる）。つまり、環境ファイルに写したプロキシ設定が、その時点では断られていた。
+- install をやり直すと戻るので、シェルのプロキシ設定（認証情報）が時間とともに変わり、写しが古くなる可能性がある。まだ確かめていない。
+- `setup.sh netcheck` を足した: シェルの設定と環境ファイルの写しを変数ごとに比べ（同じか違うか・URL に認証情報が入っているか）、
+  それぞれで slack.com / api.github.com に CONNECT して状態コードを出す。値は出さない。設定がどのファイルから来ているかも、ファイル名だけ出す。
+- check の失敗の文も、何が起きたかが分かるようにした（プロキシがトンネルを断った／gh の終了コードとエラーの 1 行。URL とホスト名は伏せる）。
+
+```text
+<@U0CCCH69XMW> ありがとうございます。状態を変えずに原因を調べたいので、次をお願いします（install はまだ実行しないでください。古くなった状態を見たいためです）。
+
+1. cd ~/opencode-slack-channel && git pull --ff-only
+2. ~/opencode-slack-channel/deploy/linux/setup.sh netcheck
+   （いつものプロキシの環境変数が入ったシェルで。値は表示されず、同じか違うかと状態コードだけが出ます）
+3. ~/opencode-slack-channel/deploy/linux/setup.sh check --no-model
+4. 2 と 3 の出力をそのまま返信してください。あわせて、このシェルのプロキシの環境変数が時間で入れ替わるもの（トークン入りで期限があるなど）かどうか、ご存じなら教えてください。
+```
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、

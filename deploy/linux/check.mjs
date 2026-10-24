@@ -27,7 +27,17 @@ let failures = 0
 const ok = (label, detail = '') => console.log('✓ ' + label + (detail ? ' — ' + detail : ''))
 const bad = (label, detail = '') => { failures++; console.log('✗ ' + label + (detail ? ' — ' + detail : '')) }
 const note = (label, detail = '') => console.log('· ' + label + (detail ? ' — ' + detail : ''))
-const errText = (error) => (error?.message ?? String(error)) + (error?.cause ? ' (' + (error.cause.code ?? error.cause.message) + ')' : '')
+const proxied = ['https_proxy', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY'].some((name) => process.env[name])
+const errText = (error) => {
+  const cause = error?.cause
+  // Node's fetch through a proxy that answers CONNECT with anything but 200 (407, 403, …) fails as
+  // "Request was cancelled." with code 0 (reproduced with Node 24 and a proxy answering 407 or 403).
+  if (cause?.code === 0 && proxied) return (error?.message ?? String(error)) + ' (the proxy refused the tunnel: CONNECT was not answered with 200, e.g. 407 for missing/expired proxy credentials — run setup.sh netcheck)'
+  return (error?.message ?? String(error)) + (cause ? ' (' + (cause.code ?? cause.message) + ')' : '')
+}
+/** A tool's error line without URLs, user:pass@ or host:port (proxy settings must not be printed). */
+const scrub = (text) => String(text ?? '').split('\n').find((line) => line.trim())?.replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>')
+  .replace(/\S+@\S+/g, '<…>').replace(/\b[\w.-]+:\d{2,5}\b/g, '<host:port>').slice(0, 160) ?? ''
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function slackCall(method, token) {
@@ -85,12 +95,19 @@ function catalogNote(logFile) {
  * `expectSwitch`: the model is one the server does not have, so passing means the fallback
  * plugin moved the session to another model.
  */
-/** Methods of the OpenCode Console logins stored in opencode (account labels are not read out). */
-function consoleLogins(bin) {
+/**
+ * What the running opencode server holds for OpenCode Console (Zen): the methods of stored logins
+ * (account labels are not read out) and whether it sees OPENCODE_API_KEY in its own environment.
+ */
+function consoleAuth(bin) {
   try {
     const list = JSON.parse(execFileSync(bin, ['auth', 'list', '--format', 'json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30000 }))
-    return list.filter((integration) => integration.id === 'opencode').flatMap((integration) => integration.connections ?? [])
-      .filter((connection) => connection.type === 'credential').map((connection) => connection.method ?? '?')
+    const connections = list.filter((integration) => integration.id === 'opencode').flatMap((integration) => integration.connections ?? [])
+    const envKey = connections.find((connection) => connection.type === 'env' && connection.name === 'OPENCODE_API_KEY')
+    return {
+      logins: connections.filter((connection) => connection.type === 'credential').map((connection) => connection.method ?? '?'),
+      serverKey: envKey === undefined ? 'the opencode server does not see OPENCODE_API_KEY (restart it)' : 'the opencode server sees OPENCODE_API_KEY' + (envKey.status?.status ? ' (' + envKey.status.status + ': ' + envKey.status.message + ')' : ''),
+    }
   } catch {
     return undefined
   }
@@ -189,10 +206,13 @@ if (config?.model && config.model.providerID !== 'opencode') {
   note('model credentials', config.model.providerID + ' needs a key in opencode (opencode2 auth login); only Zen free models work without one')
 }
 if (config?.model?.providerID === 'opencode') {
-  const logins = opencode ? consoleLogins(opts['opencode-bin']) : undefined
+  const auth = opencode ? consoleAuth(opts['opencode-bin']) : undefined
   note('model credentials', [
     process.env.OPENCODE_API_KEY ? 'Zen API key set in the bot env (OPENCODE_API_KEY, value not shown)' : 'no Zen API key in the bot env',
-    logins === undefined ? 'OpenCode Console logins unknown' : logins.length === 0 ? 'no OpenCode Console login' : 'OpenCode Console login: ' + logins.join(', ') + ' (setup.sh zen-logout removes it)',
+    ...(auth === undefined ? ['OpenCode Console logins unknown'] : [
+      auth.logins.length === 0 ? 'no OpenCode Console login' : 'OpenCode Console login: ' + auth.logins.join(', ') + ' (setup.sh zen-logout removes it)',
+      ...(process.env.OPENCODE_API_KEY ? [auth.serverKey] : []),
+    ]),
   ].join('; '))
 }
 
@@ -219,10 +239,11 @@ if (config) {
 }
 
 try {
-  const login = execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+  const login = execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 }).trim()
   note('GitHub CLI', 'logged in as ' + login + ' — the bot acts on GitHub as this account')
-} catch {
-  note('GitHub CLI', 'gh missing or not logged in — the bot cannot use GitHub until it is')
+} catch (error) {
+  if (error.code === 'ENOENT') note('GitHub CLI', 'gh not found on PATH — the bot cannot use GitHub')
+  else note('GitHub CLI', 'gh api user failed (exit ' + (error.status ?? error.code) + ': ' + scrub(error.stderr) + ') — not logged in, or no network through the proxy')
 }
 for (const [key, envName] of [['user.name', 'GIT_AUTHOR_NAME'], ['user.email', 'GIT_AUTHOR_EMAIL']]) {
   if (process.env[envName]) {

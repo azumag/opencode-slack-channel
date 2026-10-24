@@ -62,7 +62,7 @@ git clone https://github.com/azumag/opencode-slack-channel.git ~/opencode-slack-
 ```
 
 - sudo 不要。Node ≥ 22 が無ければ公式 tarball を検証して入れる。opencode は専用の設定・データディレクトリ（`~/.opencode-slack/xdg`。`OPENCODE_CONFIG_DIR` と `XDG_DATA/STATE/CACHE_HOME`）で動かすので、その機械の `~/.config/opencode` には触れない。`XDG_CONFIG_HOME` は変えないので、ボットの中の gh / git は普段の `~/.config` を読む。
-- install を実行したシェルのプロキシ・CA の環境変数（`https_proxy` など）を、サービスの環境ファイルに写す（サービスはシェルの環境を引き継がないため。ブリッジ用に `NODE_USE_ENV_PROXY=1`、ローカル宛ては `no_proxy` に足す）。`check` はその環境ファイルだけの環境で走る。
+- install を実行したシェルのプロキシ・CA の環境変数（`https_proxy` など）を、サービスの環境ファイルに写す（サービスはシェルの環境を引き継がないため。ブリッジ用に `NODE_USE_ENV_PROXY=1`、ローカル宛ては `no_proxy` に足す）。`check` はその環境ファイルだけの環境で走る。`netcheck` は、いま実行しているシェルのプロキシ設定と環境ファイルの写しを比べ、それぞれで Slack / GitHub に CONNECT できるかを試す（値は出さず、同じか違うかと状態コードだけ）。
 - systemd のユーザーサービス（root なら system サービス）で常駐する。systemd が無ければバックグラウンドのループで動かし、再起動後の復帰用の crontab 行を表示する。
 - モデルは Zen の無料モデル。失敗したら、その時点で opencode が一覧に出している無料モデルへ自動で切り替える（同梱のフォールバックプラグインの `autoFallback`。[vendor/README.md](vendor/README.md)）。モデルが増えたり消えたりしても設定を直さなくてよい。
 - 既定は鍵なしで呼ぶ。Zen の API キーを使うときは、元の機械で `seal … --zen-key <auth.json か鍵だけのファイル>` で暗号化し、`import` すると環境ファイルの `OPENCODE_API_KEY` に入って opencode が再起動する。鍵があると有料モデルも一覧に出るが、無料モデルだけを使う:

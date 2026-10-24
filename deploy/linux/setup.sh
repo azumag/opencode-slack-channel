@@ -8,6 +8,8 @@
 #   deploy/linux/setup.sh import <blob>      open the sealed secrets (Slack tokens; a Zen API key goes into the
 #                                            env file as OPENCODE_API_KEY and restarts opencode)
 #   deploy/linux/setup.sh zen-logout         remove opencode's stored OpenCode Console login(s)
+#   deploy/linux/setup.sh netcheck           compare this shell's proxy settings with the env file's and try
+#                                            each against Slack/GitHub (names and status codes only)
 #   deploy/linux/setup.sh check [--no-model] verify everything without connecting to Slack's socket
 #   deploy/linux/setup.sh git-identity "<name>" <email>   who the bot's commits are by (not ~/.gitconfig)
 #   deploy/linux/setup.sh start --cutover    start the Slack bridge (only once the old bot is stopped)
@@ -413,6 +415,49 @@ cmd_import() {
   fi
 }
 
+# Run from the shell whose proxy works: compare its proxy settings with the copy in the env file the
+# services use, and try each one against Slack and GitHub. Prints names, same/different and status codes
+# only, never a value.
+cmd_netcheck() {
+  [ -f "$ENV_FILE" ] || die "$ENV_FILE not found — run: $SELF install"
+  local v s f label c rc out tried=" " any=0
+  step "proxy settings: this shell vs $ENV_FILE"
+  for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
+    s="${!v-}"
+    f="$(sed -n "s/^$v=//p" "$ENV_FILE" | tail -n 1)"; f="${f#\"}"; f="${f%\"}"
+    case "$v" in no_proxy|NO_PROXY) f="${f%,127.0.0.1,localhost,::1}" ;; esac   # install appends loopback
+    [ -n "$s$f" ] || continue
+    any=1
+    if [ -z "$f" ]; then out="not in the env file"
+    elif [ -z "$s" ]; then out="only in the env file"
+    elif [ "$s" = "$f" ]; then out="same"
+    else out="DIFFERENT"; fi
+    case "$s" in *://*@*) out="$out; shell value has user:pass@" ;; esac
+    case "$f" in *://*@*) out="$out; env file value has user:pass@" ;; esac
+    say "$v: $out"
+  done
+  [ "$any" = 1 ] || say "no proxy settings in this shell or the env file"
+
+  step "CONNECT through each proxy (slack.com, api.github.com)"
+  for v in https_proxy HTTPS_PROXY all_proxy ALL_PROXY; do
+    for label in shell envfile; do
+      if [ "$label" = shell ]; then s="${!v-}"; else s="$(sed -n "s/^$v=//p" "$ENV_FILE" | tail -n 1)"; s="${s#\"}"; s="${s%\"}"; fi
+      [ -n "$s" ] || continue
+      case "$tried" in *" $label:$v "*) continue ;; esac
+      tried="$tried$label:$v "
+      for f in https://slack.com/api/api.test https://api.github.com/zen; do
+        c="$(curl -s -o /dev/null --max-time 20 -x "$s" -w '%{http_connect} %{http_code}' "$f" 2>/dev/null)" && rc=0 || rc=$?
+        say "$label $v → ${f#https://}: CONNECT ${c% *} → HTTP ${c#* } (curl exit $rc)"
+      done
+    done
+  done
+
+  step "where this shell's proxy settings come from (file names only)"
+  out="$(grep -lsE '^[^#]*(https?_proxy|HTTPS?_PROXY|all_proxy|ALL_PROXY)' /etc/environment /etc/profile /etc/profile.d/* /etc/bash.bashrc \
+    "$HOME/.bashrc" "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.zshrc" 2>/dev/null || true)"
+  if [ -n "$out" ]; then say "$out"; else say "none of the usual profile files set them (the environment that runs this shell does)"; fi
+}
+
 # Drop the OpenCode Console logins (device login) stored in the bot's opencode, so that Zen sees only the
 # API key from `import`, or no credential at all. Account labels are not printed.
 cmd_zen_logout() {
@@ -547,6 +592,7 @@ case "${1:-}" in
   import) shift; cmd_import "$@" ;;
   git-identity) shift; cmd_git_identity "$@" ;;
   zen-logout) cmd_zen_logout ;;
+  netcheck) cmd_netcheck ;;
   check) shift; cmd_check "$@" ;;
   start) shift; cmd_start "$@" ;;
   start-saved) cmd_start_saved ;;
@@ -554,5 +600,5 @@ case "${1:-}" in
   status) cmd_status ;;
   logs) shift; cmd_logs "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
