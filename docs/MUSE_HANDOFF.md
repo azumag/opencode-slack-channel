@@ -47,6 +47,7 @@ node deploy/secrets.mjs seal 'osc-pub1:…' --tokens ~/.config/opencode-slack-ch
 ```
 
 渡すのは Slack のトークン 2 つだけ。VM のボットは Zen の無料モデルだけを使うので、モデルの鍵は要らない（無料モデルは鍵なしで呼べる）。
+VM の IP で無料枠が尽きていたため、Zen の API キーも渡せるようにした（`--zen-key`。下の「2026-10-24 (5)」）。
 なお opencode v2 はモデルの鍵を `auth.json` ではなく自分の DB から読む。鍵が要るモデルにするなら、`opencode2 auth export --standalone <id>` /
 `auth import` で移す（OAuth の `opencode` は、リフレッシュトークンを 2 台で共有すると片方が切れうるので移さない）。
 
@@ -206,6 +207,63 @@ owner の判断（2026-10-24）: Zen に VM でログインして、無料のま
    ~/opencode-slack-channel/deploy/linux/setup.sh install（opencode が再起動します）のあとにもう一度 check して、その結果も返信してください。
 ```
 
+## 2026-10-24 (5): ログインしても変わらない → Mac と同じく API キーで呼ぶ
+
+依頼文 (4) の結果: デバイス承認でのログインは完了した（`Connected to OpenCode Console`）。それでも check は全部の無料モデルで
+`Free usage limit reached` のままで、opencode を再起動しても同じだった。一方 Mac の opencode（v1。ブラウザでログインしていて、
+`~/.local/share/opencode/auth.json` に Zen の API キーが `"type": "api"` で入っている）は無料モデルで普通に答える。
+
+- VM でも API キーで呼べば通るかは、**試すまで分からない**（無料枠の数え方は公式ドキュメントに書かれていない）。
+- Mac で確かめたこと（2026-10-24、v2 2.0.31 を専用ディレクトリで起動）: 鍵なしで glm-5.3-flash-free が 2 秒で OK、
+  `OPENCODE_API_KEY`（Mac の鍵）を入れても 3 秒で OK、cost 0。鍵を入れても無料モデルの呼び出しが壊れないことは分かったが、
+  Mac の IP にはもともと枠があるので、VM で通るかの証拠にはならない。
+
+キットに足したもの:
+- `node deploy/secrets.mjs seal 'osc-pub1:…' --zen-key FILE`。FILE は opencode の `auth.json`（`opencode` の API キーを取り出す）か、鍵だけを書いたファイル。
+- VM の `import` は、鍵を環境ファイルの `OPENCODE_API_KEY` に入れて、opencode を再起動する（ブリッジが動いていなければ）。
+  `install --reconfigure` でも鍵は消えない。
+- `setup.sh zen-logout`: opencode に保存された OpenCode Console のログインを消す（今回は鍵だけで試すため）。アカウント名は出さない。
+- `check` の `model credentials` に、鍵があるか・Console のログインがあるかだけを出す（値は出さない）。
+
+鍵があると Zen の有料モデルも一覧に出る。ボットは無料モデルだけを使うよう、次を入れた。
+- セッションが有料モデルにいたら、プロンプトの前に無料モデルへ移す（プラグインの `freeOnly`）。
+  サブエージェントのツールはモデルを引数で指定できるので、その対策。
+- タイトル生成のモデルを glm-5.3-flash-free に固定した（`agent.title.model`）。固定しないと opencode は gpt-luna などの有料モデルを選ぶ
+  （バイナリと 10/24 のカタログで確認）。固定したモデルが一覧から消えたら、セッションのモデル（無料）で作る。
+- OpenCode Go（同じ `OPENCODE_API_KEY` を読む）を `disabled_providers` で外した。
+- これで塞いだのは見つけた経路だけ。初めて鍵で動かしたあとは、Zen のコンソールで利用額が 0 のままか見る。
+
+```text
+<@U0CCCH69XMW> ログインしても無料枠の判定は変わりませんでした。Mac は Zen の API キーで呼んでいて通っているので、VM も API キーで試します。次をお願いします（ブリッジはまだ起動しないでください）。
+
+1. cd ~/opencode-slack-channel && git pull --ff-only
+2. ~/opencode-slack-channel/deploy/linux/setup.sh install --reconfigure
+   （前回と同じく、プロキシの環境変数が入ったいつものシェルで）
+3. ~/opencode-slack-channel/deploy/linux/setup.sh zen-logout
+   （前回のデバイス承認でできた OpenCode Console のログインを消します。API キーだけで試すためです）
+4. ~/opencode-slack-channel/deploy/linux/setup.sh keygen
+5. 1〜4 の出力の末尾と、4 で出た osc-pub1:… の 1 行を、このスレッドに返信してください（公開鍵なので貼って大丈夫です）。
+```
+
+Mac 側（Muse が返した `osc-pub1:…` を使う。出力の `osc-sealed1:…` を次の依頼文に入れる）:
+
+```sh
+cd ~/work/opencode-slack-channel
+node deploy/secrets.mjs seal 'osc-pub1:…' --zen-key ~/.local/share/opencode/auth.json
+```
+
+Mac と同じ鍵を使うと、VM 側だけを止めたいときも鍵ごと無効にすることになる。分けたいなら、OpenCode のコンソールで VM 用の鍵を作り、
+権限 600 のファイルに鍵だけを書いて `--zen-key そのファイル` にする。
+
+```text
+<@U0CCCH69XMW> 続きです（鍵の値は表示されません）。
+
+1. ~/opencode-slack-channel/deploy/linux/setup.sh import 'osc-sealed1:…'
+2. ~/opencode-slack-channel/deploy/linux/setup.sh check
+
+両方の出力を返信してください。
+```
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、
@@ -257,4 +315,4 @@ done
   一覧にあるもの、そのあとに残りの無料モデルを新しい順。
 - **`secrets-hygiene.md` を VM では instructions に入れた。** Mac では `~/.config/opencode/rules/` に置いてあるだけで、opencode.json から読まれていない。GitHub に投稿するときは `~/.opencode-slack/agent-guards/gh-comment` 経由になる。
 - **Mac のグローバルプラグイン（auto-continue / loop / fiosracht-model-sync）は入れない。** ボットのセッションで動いた記録が無く、fiosracht プロバイダはもう無い。
-- **Zen 無料モデルの日次枠は IP ごと**なので、VM は Mac と別の枠になる。
+- **Zen 無料モデルの日次枠は IP ごと**（とされる）なので、VM は Mac と別の枠になる。VM の IP では尽きていたので、Zen の API キーで呼ぶ（「2026-10-24 (5)」）。

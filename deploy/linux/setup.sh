@@ -5,7 +5,9 @@
 #                                            opencode server only (never the Slack bridge). --reconfigure
 #                                            rewrites the configs from the templates (old ones kept as .bak-*)
 #   deploy/linux/setup.sh keygen             print a one-line public key for the secrets handoff
-#   deploy/linux/setup.sh import <blob>      open the sealed secrets (the Slack tokens)
+#   deploy/linux/setup.sh import <blob>      open the sealed secrets (Slack tokens; a Zen API key goes into the
+#                                            env file as OPENCODE_API_KEY and restarts opencode)
+#   deploy/linux/setup.sh zen-logout         remove opencode's stored OpenCode Console login(s)
 #   deploy/linux/setup.sh check [--no-model] verify everything without connecting to Slack's socket
 #   deploy/linux/setup.sh git-identity "<name>" <email>   who the bot's commits are by (not ~/.gitconfig)
 #   deploy/linux/setup.sh start --cutover    start the Slack bridge (only once the old bot is stopped)
@@ -312,9 +314,9 @@ cmd_install() {
   # The agent's shell tools inherit this PATH: keep the installing user's PATH (git, gh, …) after ours.
   # HOME too: systemd gives a unit the passwd home of its User=, which is not always where this was
   # installed (root with HOME=/home/<user>), and the bridge and gh/git all look under HOME.
-  # A git identity set with `git-identity` survives a re-install.
+  # A git identity set with `git-identity` and a Zen API key from `import` survive a re-install.
   local kept_git=""
-  [ -f "$ENV_FILE" ] && kept_git="$(grep -E '^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)=' "$ENV_FILE" || true)"
+  [ -f "$ENV_FILE" ] && kept_git="$(grep -E '^(GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)|OPENCODE_API_KEY)=' "$ENV_FILE" || true)"
   cat > "$ENV_FILE" <<EOF
 HOME=$HOME
 PATH=$OSC_HOME/opencode-cli/bin:$(dirname "$node"):$PATH
@@ -396,7 +398,44 @@ cmd_keygen() {
 cmd_import() {
   [ -n "${1:-}" ] || die "usage: $SELF import <osc-sealed1:…>"
   load_env
-  "$OSC_NODE" "$REPO_DIR/deploy/secrets.mjs" open "$HANDOFF_KEY" "$1" --tokens-out "$BOT_TOKENS"
+  local before after
+  before="$(grep '^OPENCODE_API_KEY=' "$ENV_FILE" | cksum || true)"
+  "$OSC_NODE" "$REPO_DIR/deploy/secrets.mjs" open "$HANDOFF_KEY" "$1" --tokens-out "$BOT_TOKENS" --env-out "$ENV_FILE"
+  after="$(grep '^OPENCODE_API_KEY=' "$ENV_FILE" | cksum || true)"
+  # A Zen API key lands in the env file, which opencode only reads when it starts.
+  [ "$before" != "$after" ] || return 0
+  if bridge_running; then
+    say "the bridge is running: the Zen API key takes effect at the next opencode restart"
+  elif opencode_running; then
+    service_restart_opencode
+    wait_for_opencode || die "opencode did not come back after the restart"
+    say "opencode restarted with the Zen API key"
+  fi
+}
+
+# Drop the OpenCode Console logins (device login) stored in the bot's opencode, so that Zen sees only the
+# API key from `import`, or no credential at all. Account labels are not printed.
+cmd_zen_logout() {
+  load_env
+  opencode_running || die "the opencode server is not running — run: $SELF install"
+  local ids id n=0
+  ids="$("$OC_BIN" auth list --format json | "$OSC_NODE" -e '
+    for (const i of JSON.parse(require("fs").readFileSync(0, "utf8")))
+      if (i.id === "opencode") for (const c of i.connections ?? []) if (c.type === "credential") console.log(c.id)')" \
+    || die "could not list opencode's credentials"
+  for id in $ids; do
+    "$OC_BIN" auth logout opencode "$id" >/dev/null || die "logout failed"
+    n=$((n + 1))
+  done
+  say "removed $n OpenCode Console login(s)"
+  [ "$n" -gt 0 ] || return 0
+  if bridge_running; then
+    say "the bridge is running: opencode drops the login at its next restart"
+  else
+    service_restart_opencode
+    wait_for_opencode || die "opencode did not come back after the restart"
+    say "opencode restarted"
+  fi
 }
 
 # The bot's commits only: GIT_AUTHOR_*/GIT_COMMITTER_* in the env file. ~/.gitconfig is not touched,
@@ -507,6 +546,7 @@ case "${1:-}" in
   keygen) cmd_keygen ;;
   import) shift; cmd_import "$@" ;;
   git-identity) shift; cmd_git_identity "$@" ;;
+  zen-logout) cmd_zen_logout ;;
   check) shift; cmd_check "$@" ;;
   start) shift; cmd_start "$@" ;;
   start-saved) cmd_start_saved ;;
@@ -514,5 +554,5 @@ case "${1:-}" in
   status) cmd_status ;;
   logs) shift; cmd_logs "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

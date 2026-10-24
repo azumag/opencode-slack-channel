@@ -85,6 +85,17 @@ function catalogNote(logFile) {
  * `expectSwitch`: the model is one the server does not have, so passing means the fallback
  * plugin moved the session to another model.
  */
+/** Methods of the OpenCode Console logins stored in opencode (account labels are not read out). */
+function consoleLogins(bin) {
+  try {
+    const list = JSON.parse(execFileSync(bin, ['auth', 'list', '--format', 'json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 30000 }))
+    return list.filter((integration) => integration.id === 'opencode').flatMap((integration) => integration.connections ?? [])
+      .filter((connection) => connection.type === 'credential').map((connection) => connection.method ?? '?')
+  } catch {
+    return undefined
+  }
+}
+
 async function probeModel(opencode, config, logFile, { label = 'model answers', model = config.model, expectSwitch = false } = {}) {
   const started = Date.now()
   const logFrom = logFile && existsSync(logFile) ? statSync(logFile).size : 0
@@ -176,6 +187,13 @@ if (config) {
 
 if (config?.model && config.model.providerID !== 'opencode') {
   note('model credentials', config.model.providerID + ' needs a key in opencode (opencode2 auth login); only Zen free models work without one')
+}
+if (config?.model?.providerID === 'opencode') {
+  const logins = opencode ? consoleLogins(opts['opencode-bin']) : undefined
+  note('model credentials', [
+    process.env.OPENCODE_API_KEY ? 'Zen API key set in the bot env (OPENCODE_API_KEY, value not shown)' : 'no Zen API key in the bot env',
+    logins === undefined ? 'OpenCode Console logins unknown' : logins.length === 0 ? 'no OpenCode Console login' : 'OpenCode Console login: ' + logins.join(', ') + ' (setup.sh zen-logout removes it)',
+  ].join('; '))
 }
 
 if (config) {

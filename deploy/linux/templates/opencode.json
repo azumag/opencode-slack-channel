@@ -3,9 +3,13 @@
   "plugins": [
     "@OSC_HOME@/plugins/opencode-rate-limit-fallback"
   ],
+  "agent": {
+    "title": { "model": "opencode/glm-5.3-flash-free" }
+  },
   "disabled_providers": [
     "google",
-    "minimax"
+    "minimax",
+    "opencode-go"
   ],
   "instructions": [
     "@OSC_HOME@/xdg/config/opencode/rules/worktree-scope.md",

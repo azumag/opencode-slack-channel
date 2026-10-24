@@ -151,9 +151,15 @@ export default {
                 return [];
             }
         };
-        // A model a session may stay on: listed and not "unavailable" lately.
-        const usable = async (model) => !isUnavailable(model)
-            && (await listedModels()).some((listed) => listed.providerID === model.providerID && listed.id === model.id);
+        // A model a session may stay on: listed, not "unavailable" lately and, with
+        // freeOnly, free. A paid model can be listed once the provider has a key, and
+        // a session can land on one (the subagent tool takes a model argument).
+        const usable = async (model) => {
+            if (isUnavailable(model))
+                return false;
+            const listed = (await listedModels()).find((candidate) => candidate.providerID === model.providerID && candidate.id === model.id);
+            return listed !== undefined && !(auto?.freeOnly && auto.providers.includes(model.providerID) && !isFree(listed));
+        };
         // Configured fallbacks the server lists, then the other listed models of
         // autoFallback.providers, newest release first.
         const autoFallbacks = async () => {
@@ -229,8 +235,8 @@ export default {
             await switchModel(sessionID, streak.original);
         };
         // Before a real prompt runs (autoFallback): a session on a model the server
-        // no longer lists, or one that answered "unavailable" lately, moves to the
-        // first usable fallback instead of failing first.
+        // no longer lists, one that answered "unavailable" lately, or (freeOnly) a
+        // paid one, moves to the first usable fallback instead of failing first.
         const leaveUnusableModel = async (sessionID) => {
             const current = await currentModel(sessionID);
             if (current === undefined || !auto.providers.includes(current.providerID) || (await usable(current)))

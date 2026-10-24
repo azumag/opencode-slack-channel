@@ -4,11 +4,13 @@
 //
 //   on the target:  node deploy/secrets.mjs keygen <keyFile>
 //                   → prints a one-line public key (osc-pub1:…); the private key stays in <keyFile> (600)
-//   on the source:  node deploy/secrets.mjs seal <osc-pub1:…> [--tokens FILE] [--auth FILE --provider ID …]
+//   on the source:  node deploy/secrets.mjs seal <osc-pub1:…> [--tokens FILE] [--auth FILE --provider ID …] [--zen-key FILE]
 //                   → prints a one-line sealed blob (osc-sealed1:…)
-//   on the target:  node deploy/secrets.mjs open <keyFile> <osc-sealed1:…> --tokens-out FILE [--auth-out FILE]
-//                   → writes the Slack tokens file and/or merges providers into an opencode auth.json (600),
-//                     then deletes <keyFile> (one key per handoff)
+//                     --zen-key: an OpenCode Zen API key, from an opencode auth.json (its "opencode" api entry)
+//                     or a file holding just the key
+//   on the target:  node deploy/secrets.mjs open <keyFile> <osc-sealed1:…> --tokens-out FILE [--auth-out FILE] [--env-out FILE]
+//                   → writes the Slack tokens file, merges providers into an opencode auth.json and/or sets
+//                     OPENCODE_API_KEY in an env file (all 600), then deletes <keyFile> (one key per handoff)
 //
 // No secret value is ever written to stdout/stderr; only names and counts.
 
@@ -63,6 +65,29 @@ function parseArgs(argv) {
   return { positional, options }
 }
 
+const ZEN_KEY_VAR = 'OPENCODE_API_KEY'
+
+/** The Zen API key in an opencode auth.json ({"opencode": {"type": "api", "key"}}) or a file holding just the key. */
+function readZenKey(path) {
+  const text = readFileSync(expand(path), 'utf8').trim()
+  let key = text
+  if (text.startsWith('{')) {
+    const entry = JSON.parse(text).opencode
+    if (entry?.type !== 'api' || typeof entry.key !== 'string') die(path + ' has no "opencode" API key (an OAuth login is not a key: create one in the OpenCode console)')
+    key = entry.key.trim()
+  }
+  // It goes into an env file read by both systemd and the shell: keep it to characters neither interprets.
+  if (!key || /["'\\$`\s]/.test(key)) die('the Zen API key in ' + path + ' is empty or has quotes, backslashes, $, backticks or spaces')
+  return key
+}
+
+/** Set NAME="value" in an env file, replacing an earlier line for the same name. */
+function setEnvLine(path, name, value) {
+  const lines = existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter((line) => line && !line.startsWith(name + '=')) : []
+  lines.push(name + '="' + value + '"')
+  writePrivate(path, lines.join('\n') + '\n')
+}
+
 function keygen(keyFile) {
   if (!keyFile) die('usage: secrets.mjs keygen <keyFile>', 2)
   keyFile = expand(keyFile)
@@ -73,7 +98,7 @@ function keygen(keyFile) {
 }
 
 function seal(pub, options) {
-  if (!pub?.startsWith(PUB_PREFIX)) die('usage: secrets.mjs seal <' + PUB_PREFIX + '…> [--tokens FILE] [--auth FILE --provider ID …]', 2)
+  if (!pub?.startsWith(PUB_PREFIX)) die('usage: secrets.mjs seal <' + PUB_PREFIX + '…> [--tokens FILE] [--auth FILE --provider ID …] [--zen-key FILE]', 2)
   const recipientX = pub.slice(PUB_PREFIX.length).trim()
   const payload = { v: 1 }
   const summary = []
@@ -93,7 +118,11 @@ function seal(pub, options) {
     }
     summary.push('opencode auth: ' + options.provider.join(', '))
   }
-  if (summary.length === 0) die('nothing to seal (give --tokens and/or --auth + --provider)', 2)
+  if (options.zenKey) {
+    payload.zenApiKey = readZenKey(options.zenKey)
+    summary.push('Zen API key')
+  }
+  if (summary.length === 0) die('nothing to seal (give --tokens, --auth + --provider and/or --zen-key)', 2)
 
   const recipient = publicKeyFromX(recipientX)
   const { privateKey: ephPrivate, publicKey: ephPublic } = generateKeyPairSync('x25519')
@@ -108,7 +137,7 @@ function seal(pub, options) {
 }
 
 function open(keyFile, sealed, options) {
-  if (!keyFile || !sealed?.startsWith(SEALED_PREFIX)) die('usage: secrets.mjs open <keyFile> <' + SEALED_PREFIX + '…> --tokens-out FILE [--auth-out FILE]', 2)
+  if (!keyFile || !sealed?.startsWith(SEALED_PREFIX)) die('usage: secrets.mjs open <keyFile> <' + SEALED_PREFIX + '…> --tokens-out FILE [--auth-out FILE] [--env-out FILE]', 2)
   keyFile = expand(keyFile)
   if (!existsSync(keyFile)) die(keyFile + ' not found — run keygen on this machine first (the key is deleted after one successful open)')
   const jwk = JSON.parse(readFileSync(keyFile, 'utf8'))
@@ -141,6 +170,11 @@ function open(keyFile, sealed, options) {
     Object.assign(merged, payload.opencodeAuth)
     writePrivate(out, JSON.stringify(merged, null, 2) + '\n')
     written.push('opencode auth (' + Object.keys(payload.opencodeAuth).join(', ') + ') → ' + options.authOut)
+  }
+  if (payload.zenApiKey) {
+    if (!options.envOut) die('the blob holds a Zen API key: give --env-out <file>', 2)
+    setEnvLine(expand(options.envOut), ZEN_KEY_VAR, payload.zenApiKey)
+    written.push('Zen API key → ' + ZEN_KEY_VAR + ' in ' + options.envOut)
   }
   rmSync(keyFile, { force: true })
   process.stdout.write(written.join('\n') + '\nhandoff key deleted\n')
