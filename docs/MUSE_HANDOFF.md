@@ -367,7 +367,7 @@ node deploy/secrets.mjs seal 'osc-pub1:…' --go-key ~/.local/share/opencode/aut
 | `start --cutover` 以降に `stop` した、または一度も起動していない | 何もしない（止めたボットは生き返らせない） | `start-saved: not wanted …` |
 | 両方のサービスが動いていて、Slack につながっていて、プロキシの写しも通る | 何もしない | `start-saved: running — nothing to do` |
 | どちらかが動いていない（作り直しでサービス定義が消えた等） | install をやり直す（設定・API キー・トークン・opencode のバージョンはそのまま、プロキシ設定は実行したシェルから写し直す）→ ブリッジを起動 | `start-saved: RECOVERING …` |
-| 動いているが、環境ファイルのプロキシの写しが拒否され、シェルの設定なら通る（または直近 3 回の Slack 接続がすべて失敗） | シェルのプロキシ設定を写し直して両方を再起動 | `start-saved: RESTARTING …` |
+| 動いているが、プロキシが環境ファイルの写しを 401/403/407 で断り（2 回試す）、シェルの設定なら通す（または直近 3 回の Slack 接続がすべて失敗） | シェルのプロキシ設定を写し直して両方を再起動。断られたときのコードも出す | `start-saved: RESTARTING …` |
 
 最後は `start-saved: done — the bot is running and connected`（失敗なら `error:` で始まる行、終了コード 1）。
 Claude キットとの違いは、プロキシの写しを直接試すこと（curl で Slack の `api.test`）。ブリッジの Slack 接続は前から開いたまま
@@ -409,6 +409,20 @@ owner の OK を受けて Muse が実行。01:32:48（VM の時刻）にブリ�
 `running`、01:32:50 に `socket connected (num_connections=1)`（この Slack アプリの接続は VM の 1 本だけ）。Muse の cron
 `opencode-bot-autorecover` は、この時点から `bridge-wanted` を見て動く。owner が #agent-council でメンションし、VM のボットから
 返事が来ることを確認した（移行完了）。Mac のブリッジと v2 サーバーの plist は、戻すときのために `.disabled` のまま残してある。
+
+## 2026-10-25: 切り替え 7 分後の RESTARTING（01:39）
+
+Muse の cron の 2 回目（切り替え後の初回）で `RESTARTING — the env file's proxy settings are refused`。両方を再起動して
+`socket connected (num_connections=1)` まで戻った。写しは 01:32 の install のシェルのもの。
+
+ただし、この判定は「Slack から HTTP 200 が返らなければ拒否」という粗いもので、一時的な遅れや Slack 側のエラーでも再起動していた。
+一方で Claude ボットは、00:34 の install のシェルの写しのまま 02:00 ごろにも返事できていた（owner が確認）。写しが本当に断られたのかは
+わからない。そこで:
+
+- 判定を「プロキシが 401/403/407 で断った」ときだけにした（2 回試す）。つながらない・遅いだけなら何もしない。
+  RESTARTING の行に、写しとシェルそれぞれの CONNECT / HTTP のコードを出す。
+- start-saved が動いたときの行を `~/.opencode-slack/logs/start-saved.history` に残し、`setup.sh status` で直近 5 件を出す。
+- netcheck の CONNECT の試験に、`/etc/environment` の設定（起動時に書かれる）も加えた。
 
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 

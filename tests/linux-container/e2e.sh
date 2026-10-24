@@ -98,12 +98,23 @@ sleep 2
 PX="http://user3:pass3@$PROXY:8888"
 out="$(vm "$SETUP start-saved" 2>&1)" || { echo "$out"; fail "start-saved restart"; }
 grep '^start-saved:' <<<"$out" | sed 's/^/  /'
-grep -q "start-saved: RESTARTING — the env file's proxy settings are refused" <<<"$out" || fail "start-saved did not see the refused proxy copy"
+grep -q "start-saved: RESTARTING — the proxy refuses the env file's settings and lets this shell's through (env file's: CONNECT/HTTP 000 401; this shell's: 000 200)" <<<"$out" || fail "start-saved did not see (or did not show the codes of) the refused proxy copy"
 grep -q 'start-saved: done' <<<"$out" || fail "start-saved restart not done"
 [ "$(main_pid opencode-slack-opencode)" != "$pid_before" ] || fail "opencode server was not restarted"
 [ "$(env_has 'user3:pass3@')" -ge 1 ] && [ "$(env_has 'user2:pass2@')" = 0 ] || fail "env file did not swap to the new proxy credentials"
 [ "$(state | jq_ 'v.connected')" = 1 ] || fail "not connected after the restart"
-pass "refused proxy copy under a running bot → both restarted with this shell's settings"
+status="$(vm "$SETUP status")"
+grep -q 'start-saved acted (last 5, UTC):' <<<"$status" && grep -q 'RESTARTING — the proxy refuses' <<<"$status" || { echo "$status"; fail "status does not show what start-saved did"; }
+pass "refused proxy copy under a running bot → both restarted with this shell's settings; status shows it"
+
+echo "== a copy that only times out / cannot connect is not a refusal: no restart"
+vm "sed -i 's#^https_proxy=.*#https_proxy=\"http://$PROXY:1\"#' /home/hatch/.opencode-slack/env"
+pid_before="$(main_pid opencode-slack-opencode)"
+out="$(vm "$SETUP start-saved" 2>&1)" || { echo "$out"; fail "start-saved with an unreachable proxy copy"; }
+grep -q 'start-saved: running — nothing to do' <<<"$out" || { echo "$out"; fail "start-saved restarted on a copy that was not refused"; }
+[ "$(main_pid opencode-slack-opencode)" = "$pid_before" ] || fail "opencode restarted on a copy that was not refused"
+vm "$SETUP net-refresh" >/dev/null
+pass "an unreachable (not refusing) proxy copy does not restart the bot"
 
 echo "== a shell whose proxy is refused too: start-saved does not touch a working bot"
 proxy_auth user4 pass4

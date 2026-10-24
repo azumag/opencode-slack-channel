@@ -344,22 +344,37 @@ slack_probe_url() {
   printf '%s/api.test\n' "${base:-https://slack.com/api}"
 }
 
-proxy_gets_through() { # proxy URL → 0 when Slack answers through it
-  [ "$(curl -s -o /dev/null --max-time 20 -x "$1" -w '%{http_code}' "$(slack_probe_url)" 2>/dev/null || true)" = 200 ]
-}
+# "<CONNECT code> <HTTP code>" of a request to Slack through proxy $1 (000: none; a plain-http target has no CONNECT).
+proxy_codes() { curl -s -o /dev/null --max-time 20 -x "$1" -w '%{http_connect} %{http_code}' "$(slack_probe_url)" 2>/dev/null || true; }
+
+# The proxy itself said no: 401/403/407 to the CONNECT (or, for a plain-http target, as the answer). A timeout
+# or an error from Slack is not a refusal: re-copying the settings would not help, so it must not cause a restart.
+proxy_refused() { case "$1" in 401\ *|403\ *|407\ *|000\ 401|000\ 403|000\ 407) return 0 ;; esac; return 1; }
+proxy_passes() { case "$1" in 200\ *|000\ 200) return 0 ;; esac; return 1; }
 
 # Muse's VM hands out new proxy credentials, and the copy in the env file can stop working. A running
 # bridge does not notice (its Slack socket was opened earlier) but every new connection of the opencode
-# server (the models) is refused. 0 when the copy is refused and this shell's proxy gets through, i.e.
-# when net-refresh helps.
+# server (the models) is refused. 0 when the proxy refuses the copy (asked twice) and lets this shell's
+# settings through, i.e. when net-refresh helps. Sets PROBE_NOTE to the codes seen.
 env_proxy_stale() {
   command -v curl >/dev/null 2>&1 || return 1
-  local f s
+  local f s env_codes shell_codes
   f="$(env_get https_proxy)"; [ -n "$f" ] || f="$(env_get HTTPS_PROXY)"
   s="${https_proxy:-${HTTPS_PROXY:-}}"
   [ -n "$f" ] && [ -n "$s" ] && [ "$f" != "$s" ] || return 1
-  ! proxy_gets_through "$f" && proxy_gets_through "$s"
+  env_codes="$(proxy_codes "$f")"
+  proxy_refused "$env_codes" || return 1
+  sleep 3
+  env_codes="$(proxy_codes "$f")"
+  proxy_refused "$env_codes" || return 1
+  shell_codes="$(proxy_codes "$s")"
+  PROBE_NOTE="env file's: CONNECT/HTTP $env_codes; this shell's: $shell_codes"
+  proxy_passes "$shell_codes"
 }
+
+# A start-saved line, also kept in $LOG_DIR/start-saved.history (how often it had to act, and why).
+record() { say "$*"; printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG_DIR/start-saved.history" 2>/dev/null || true; }
+die_saved() { record "error: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- commands
 
@@ -544,8 +559,12 @@ cmd_netcheck() {
 
   step "CONNECT through each proxy (slack.com, api.github.com)"
   for v in https_proxy HTTPS_PROXY all_proxy ALL_PROXY; do
-    for label in shell envfile; do
-      if [ "$label" = shell ]; then s="${!v-}"; else s="$(sed -n "s/^$v=//p" "$ENV_FILE" | tail -n 1)"; s="${s#\"}"; s="${s%\"}"; fi
+    for label in shell envfile etcenv; do
+      case "$label" in
+        shell) s="${!v-}" ;;
+        envfile) s="$(sed -n "s/^$v=//p" "$ENV_FILE" | tail -n 1)"; s="${s#\"}"; s="${s%\"}" ;;
+        etcenv) s="$(sed -n "s/^$v=//p" /etc/environment 2>/dev/null | tail -n 1)"; s="${s#\"}"; s="${s%\"}" ;;
+      esac
       [ -n "$s" ] || continue
       case "$tried" in *" $label:$v "*) continue ;; esac
       tried="$tried$label:$v "
@@ -682,41 +701,41 @@ cmd_start() {
 #    last Slack connection attempts all failed: take this shell's proxy settings and restart both.
 cmd_start_saved() {
   local want="$OSC_HOME/bridge-wanted" ver since why _
-  [ -d "$OSC_HOME" ] || die "start-saved: $OSC_HOME not found — run it as the user who installed the bot (HOME=$HOME)"
+  [ -d "$OSC_HOME" ] || die_saved "start-saved: $OSC_HOME not found — run it as the user who installed the bot (HOME=$HOME)"
   [ -f "$want" ] || { say "start-saved: not wanted (stopped, or never started with --cutover) — nothing to do"; return 0; }
   lock_kit 5 || { say "start-saved: another start/stop/start-saved is running — nothing to do"; return 0; }
   [ -f "$want" ] || { say "start-saved: stopped meanwhile — nothing to do"; return 0; }
   mkdir -p "$LOG_DIR"
   since="$(date -u +%FT%T)"
   if bridge_running && opencode_running; then
-    if env_proxy_stale; then why="the env file's proxy settings are refused (this shell's get through)"
+    if env_proxy_stale; then why="the proxy refuses the env file's settings and lets this shell's through ($PROBE_NOTE)"
     elif socket_failing; then why="the bridge cannot reach Slack (last connection attempts failed)"
     else say "start-saved: running — nothing to do"; return 0; fi
-    shell_has_net || die "start-saved: $why and this shell has no proxy settings to give it"
-    say "start-saved: RESTARTING — $why; taking this shell's proxy settings"
+    shell_has_net || die_saved "start-saved: $why and this shell has no proxy settings to give it"
+    record "start-saved: RESTARTING — $why; taking this shell's proxy settings"
     cmd_net_refresh
   else
     if ! shell_has_net && env_has_proxy; then
-      say "start-saved: RECOVERING — the bot should run but does not; this shell has no proxy settings, so the env file's are kept"
+      record "start-saved: RECOVERING — the bot should run but does not; this shell has no proxy settings, so the env file's are kept"
       opencode_running || service_start opencode
       load_env
-      wait_for_opencode || die "start-saved: the opencode server did not come up — $SELF logs opencode"
+      wait_for_opencode || die_saved "start-saved: the opencode server did not come up — $SELF logs opencode"
     else
-      say "start-saved: RECOVERING — the bot should run but does not; install again (configs kept, log $LOG_DIR/start-saved.log), then start"
+      record "start-saved: RECOVERING — the bot should run but does not; install again (configs kept, log $LOG_DIR/start-saved.log), then start"
       ver="$(OPENCODE_CONFIG_DIR="$OC_CONFIG" XDG_DATA_HOME="$XDG_DIR/data" XDG_STATE_HOME="$XDG_DIR/state" XDG_CACHE_HOME="$XDG_DIR/cache" \
         "$OC_BIN" --version 2>/dev/null | sed -n 's/^opencode v//p' || true)"
       if ! OPENCODE_VERSION="${ver:-$OPENCODE_VERSION}" "$SELF" install > "$LOG_DIR/start-saved.log" 2>&1; then
         tail -n 15 "$LOG_DIR/start-saved.log"
-        die "start-saved: install failed"
+        die_saved "start-saved: install failed"
       fi
     fi
     if bridge_running; then service_restart_bridge; else service_start bridge; fi
   fi
   for _ in $(seq 1 45); do connected_since "$since" && break; sleep 1; done
   cmd_logs bridge | tail -n 4
-  bridge_running || die "start-saved: the bridge is not running after the start"
-  connected_since "$since" || die "start-saved: started, but not connected to Slack within 45 s"
-  say "start-saved: done — the bot is running and connected"
+  bridge_running || die_saved "start-saved: the bridge is not running after the start"
+  connected_since "$since" || die_saved "start-saved: started, but not connected to Slack within 45 s"
+  record "start-saved: done — the bot is running and connected"
 }
 
 cmd_stop() {
@@ -738,6 +757,7 @@ cmd_status() {
   esac
   if [ -f "$OSC_HOME/bridge-wanted" ]; then say "start-saved: brings the bot back (started with --cutover, not stopped since)"
   else say "start-saved: does nothing (the bridge was not started with --cutover, or was stopped)"; fi
+  if [ -s "$LOG_DIR/start-saved.history" ]; then say "start-saved acted (last 5, UTC):"; tail -n 5 "$LOG_DIR/start-saved.history"; fi
 }
 
 cmd_logs() {
