@@ -466,6 +466,34 @@ install・`net-refresh`・`start-saved` のすべてで同じ。出力にどち�
 cron ジョブ opencode-bot-autorecover はそのままにしてください。直っていれば、このあとの cron は "nothing to do" が続きます。RESTARTING が来たら、これまでどおり出力をそのまま owner に知らせてください。
 ```
 
+## 2026-10-25: 95367d2 を VM に入れた結果（Muse の報告、02:24 JST）
+
+- pull で 95367d2。`net-refresh` は `network settings taken from /etc/environment`（プロキシ 6 変数・no_proxy・CA 4 変数・
+  NODE_USE_ENV_PROXY）、両方を再起動（opencode 02:24:43、ブリッジ 02:24:50 から active）。
+- netcheck: プロキシ 6 変数と no_proxy は `/etc/environment = env file`。CONNECT は shell / envfile / etcenv の 18 通りすべて 200、
+  環境ファイル経由の Node fetch（slack.com）は HTTP 200、gh も exit 0。
+- check は全項目合格（Go の deepseek-v4.1-flash が 3 秒、切り替え先も 2 秒）。
+- `/etc/environment` と `hatch-egress.sh` の更新時刻が **17:19:55 UTC（02:19:55 JST）** になっていた（前は 15:32:04 UTC）。
+  Muse は「VM の再起動時に書き直された」としているが、02:24 の net-refresh の時点でサービスは動いていた（作り直しなら unit が消えて
+  いて、02:19:47 の cron より後なので戻す機会もない）。作り直しなしで書き直された可能性が高い（未確認）。
+- Hermes 側の 3b（02:1x JST ごろの netcheck）では、プロキシは認証情報なしでも誤った認証情報でも CONNECT 200 だった。
+  そのままなら、このあと RESTARTING が出なくても、直したからなのか、プロキシが認証を見ていないからなのかは区別できない。
+
+未確認: 10 分ごとの RESTARTING が止まったか（Muse が 03:02 に status を報告する予定）。そのときに区別するための追加の依頼:
+
+```text
+<@U0CCCH69XMW> opencode ボットの確認ありがとうございます。03:02 の報告に、次の 3 つも加えてください（どれも読むだけで、値は出ません）。
+
+1. uptime -s
+2. ~/opencode-slack-channel/deploy/linux/setup.sh status の出力を省略せずに全部（とくに末尾の "start-saved acted (last 5, UTC):" の行。無ければ無いと書いてください）
+3. プロキシが今、認証情報を見ているかの確認（出るのは数字だけです）
+   p=$(sed -n 's/^https_proxy=//p' /etc/environment | tail -n 1 | tr -d '"')
+   curl -s -o /dev/null -m 20 -x "$(printf %s "$p" | sed -E 's#//[^@]*@#//#')" -w 'no-cred: %{http_connect} %{http_code}\n' https://api.github.com/zen
+   curl -s -o /dev/null -m 20 -x "$(printf %s "$p" | sed -E 's#//[^@]*@#//x:y@#')" -w 'wrong-cred: %{http_connect} %{http_code}\n' https://api.github.com/zen
+
+あわせて、netcheck で /etc/environment の更新時刻が 02:19:55 JST になっていた件について、VM の再起動（作り直し）と判断した根拠があれば教えてください。
+```
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、
