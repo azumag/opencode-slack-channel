@@ -172,6 +172,40 @@ opencode は直接つなごうとして失敗していた。モデルが呼べ�
 2 の出力の最後の 10 行と、3 の出力をそのまま返信してください。
 ```
 
+## 2026-10-24 (4): Zen の無料枠が VM の IP では尽きている → Zen にログインして試す
+
+依頼文 (3) の結果、プロキシは効き、カタログ・Slack・ソケットのホストは通った。ただしモデル呼び出しが
+`Free usage limit reached. Subscribe to OpenCode Go to keep going` で弾かれた。
+
+- VM からの呼び出しが Zen に届いたのはこのときが初めて（それまでは全部 TLS の段階で失敗していた）。それでも最初から上限に達していた。
+  つまり、この VM の出口の IP（プロキシ）の無料枠は、ほかの誰かがすでに使い切っていた。同じ時刻に Mac からは無料モデルが 2 秒で答えた。
+- 上限はモデルごとではない。glm → deepseek → mimo → beam と 4 つとも同じ答えだった。
+- Zen の無料枠は IP ごと（公式ドキュメントに数字や回復時刻の記載はない）。ログインすると枠が増えるという解説はあるが、確かめてはいない。
+
+owner の判断（2026-10-24）: Zen に VM でログインして、無料のまま試す。Mac のボットは止めたまま。
+
+- ログインはデバイス承認（`opencode2 auth login opencode --method device`）。VM で表示されたコードを、owner がブラウザ
+  （opencode.ai にログイン済み）で承認する。コードは 1 回限りで、承認した人のアカウントにつながるだけなので、Slack に貼ってよい。
+- ログインすると有料の Zen モデルも一覧に出る。ボットの設定と `autoFallback`（`freeOnly`）が選ぶのは無料モデルだけ。
+- あわせてプラグインを直した。無料枠の上限に当たったら、ほかの無料モデルを 30 分外し、使えるものが無ければすぐに失敗として返す。
+  これまでは 15 分ほど試し続けていた（check の `model fallback` が 240 秒で打ち切られたのはこれ）。
+
+```text
+<@U0CCCH69XMW> 無料枠がこの VM の IP では使い切られているので、opencode を Zen のアカウントにログインさせて試します。次をお願いします（ブリッジはまだ起動しないでください）。
+
+1. cd ~/opencode-slack-channel && git pull --ff-only
+2. ~/opencode-slack-channel/deploy/linux/setup.sh install --reconfigure
+   （前回と同じく、プロキシの環境変数が入ったいつものシェルで）
+3. ボットの opencode で Zen のログインを始める（承認されるまで待ち続けるので、切り離して動かします）:
+   setsid nohup env -i bash -c 'set -a; . "$0"; set +a; exec opencode2 auth login opencode --method device' ~/.opencode-slack/env > /tmp/osc-zen-login.log 2>&1 < /dev/null &
+   sleep 10; grep -E 'Enter code|https://' /tmp/osc-zen-login.log
+4. 3 で出た「Enter code: …」の行と https://opencode.ai/console/device?… の URL を、このスレッドに貼ってください（1 回限りのコードで、承認した人のアカウントにつながるだけなので貼って大丈夫です）。コードには期限があるので、すぐにお願いします。
+5. こちらで承認したら、tail -5 /tmp/osc-zen-login.log で完了を確かめてから、
+   ~/opencode-slack-channel/deploy/linux/setup.sh check
+   を実行して、ログの末尾と check の出力を返信してください。check がまだ「Free usage limit reached」なら、
+   ~/opencode-slack-channel/deploy/linux/setup.sh install（opencode が再起動します）のあとにもう一度 check して、その結果も返信してください。
+```
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、

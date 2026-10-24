@@ -58,6 +58,19 @@ function isUnavailableModelError(value) {
     const text = `${value.type ?? ""} ${value.message ?? ""}`;
     return UNAVAILABLE_MODEL_PATTERNS.some((pattern) => pattern.test(text));
 }
+/**
+ * The provider's free allowance is used up ("Free usage limit reached" from
+ * OpenCode Zen, counted per IP): all of its free models fail alike, so with
+ * autoFallback they are left out together for a while.
+ */
+const FREE_LIMIT_PATTERNS = [/free usage limit/i, /FreeUsageLimit/];
+const DEFAULT_FREE_LIMIT_MS = 30 * 60 * 1000;
+function isFreeLimitError(value) {
+    if (!value || typeof value !== "object")
+        return false;
+    const text = `${value.type ?? ""} ${value.name ?? ""} ${value.message ?? ""}`;
+    return FREE_LIMIT_PATTERNS.some((pattern) => pattern.test(text));
+}
 function isFree(model) {
     return (model.cost ?? []).every((cost) => (cost.input ?? 0) === 0 && (cost.output ?? 0) === 0);
 }
@@ -95,12 +108,15 @@ export default {
         // (only free ones unless freeOnly is false) to the configured fallbacks, so
         // models that come and go need no config change. Configured fallbacks the
         // server no longer lists are skipped, and so is a model that answered
-        // "unavailable" within unavailableMs (default 6 h).
+        // "unavailable" within unavailableMs (default 6 h), or any free model of a
+        // provider that answered "free usage limit" within freeLimitMs (default 30 min).
+        // With nothing usable left, a turn fails at once instead of waiting out backoffs.
         const auto = mode !== "wait" && Array.isArray(config.autoFallback?.providers)
             ? {
                 providers: config.autoFallback.providers,
                 freeOnly: config.autoFallback.freeOnly !== false,
                 unavailableMs: Number.isFinite(config.autoFallback.unavailableMs) ? config.autoFallback.unavailableMs : DEFAULT_UNAVAILABLE_MS,
+                freeLimitMs: Number.isFinite(config.autoFallback.freeLimitMs) ? config.autoFallback.freeLimitMs : DEFAULT_FREE_LIMIT_MS,
             }
             : undefined;
         if (mode !== "wait" && fallbacks.length === 0 && otherModels !== "wait" && auto === undefined)
@@ -111,8 +127,18 @@ export default {
         const unavailableUntil = new Map();
         const modelKey = (model) => `${model.providerID}/${model.id}`;
         const isUnavailable = (model) => (unavailableUntil.get(modelKey(model)) ?? 0) > Date.now();
-        const noteFailure = (model, error) => {
-            if (auto !== undefined && model !== undefined && isUnavailableModelError(error))
+        const noteFailure = async (model, error) => {
+            if (auto === undefined || model === undefined)
+                return;
+            if (isFreeLimitError(error)) {
+                const until = Date.now() + auto.freeLimitMs;
+                unavailableUntil.set(modelKey(model), until);
+                for (const listed of await listedModels()) {
+                    if (listed.providerID === model.providerID && isFree(listed))
+                        unavailableUntil.set(modelKey(listed), until);
+                }
+            }
+            else if (isUnavailableModelError(error))
                 unavailableUntil.set(modelKey(model), Date.now() + auto.unavailableMs);
         };
         const listedModels = async () => {
@@ -141,14 +167,13 @@ export default {
             return [...configured, ...extra].filter((model) => !isUnavailable(model));
         };
         // With autoFallback a failing model is followed by every other usable
-        // model, starting after its own place in that order and wrapping around.
+        // model in that order (a streak starts on the session's own model, so
+        // the configured fallbacks come first).
         const chainFrom = async (model) => {
             if (auto === undefined || model === undefined)
                 return chainFor(model, fallbacks);
             const order = await autoFallbacks();
-            const index = order.findIndex((candidate) => sameModel(candidate, model));
-            const rotated = index < 0 ? order : [...order.slice(index + 1), ...order.slice(0, index)];
-            return [model, ...rotated.filter((candidate) => !sameModel(candidate, model))];
+            return [model, ...order.filter((candidate) => !sameModel(candidate, model))];
         };
         const cooldownMs = effectiveCooldown(config.cooldownMs);
         const resumeTimers = new Map();
@@ -226,7 +251,11 @@ export default {
                 streaks.set(sessionID, streak);
                 position = 0;
             }
-            let next = streak.chain[position + 1];
+            // With autoFallback, models that became unusable since the chain was built are passed over.
+            let offset = position + 1;
+            while (auto !== undefined && streak.chain[offset] !== undefined && isUnavailable(streak.chain[offset]))
+                offset += 1;
+            let next = streak.chain[offset];
             let delay = SWITCH_DELAY_MS;
             if (next !== undefined && !(await switchModel(sessionID, next)))
                 next = undefined;
@@ -234,9 +263,13 @@ export default {
                 // Every model in the chain failed on this pass (or switching is not possible).
                 if (mode === "stop" && streak.chain.length > 1)
                     return { retry: false };
+                // Nothing usable is left and the failed model cannot serve either
+                // (gone, or out of free allowance): waiting would only delay the failure.
+                if (auto !== undefined && failed !== undefined && isUnavailable(failed))
+                    return { retry: false };
                 streak.passes += 1;
                 delay = exponentialDelay(cooldownMs, streak.passes);
-                const first = streak.chain[0];
+                const first = auto !== undefined ? streak.chain.find((model) => !isUnavailable(model)) : streak.chain[0];
                 if (mode !== "retry-last" && first !== undefined && !sameModel(first, failed)) {
                     if (await switchModel(sessionID, first))
                         next = first;
@@ -263,7 +296,7 @@ export default {
         const retryRegistration = await context.session.hook("retry", async (event) => {
             if (!handlesError(event.error) || !handles(event.model))
                 return;
-            noteFailure(event.model, event.error);
+            await noteFailure(event.model, event.error);
             cancelResume(event.sessionID);
             event.decision = await decide(event.sessionID, event.model);
         });
@@ -288,7 +321,7 @@ export default {
             const failed = (await currentModel(sessionID)) ?? streak.selected ?? streak.original;
             if (!handles(failed))
                 return;
-            noteFailure(failed, event.data?.error);
+            await noteFailure(failed, event.data?.error);
             const decision = await decide(sessionID, failed);
             if (decision.retry)
                 scheduleResume(sessionID, decision.delay);

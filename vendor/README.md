@@ -14,5 +14,9 @@ Linux セットアップ（[deploy/linux/setup.sh](../deploy/linux/setup.sh)）�
 - **設定ファイルを `OPENCODE_CONFIG_DIR` からも探す**（`src/utils/config.js`）。Linux 版は opencode の設定をそこに置き、`XDG_CONFIG_HOME` は変えないので、これがないとプラグインが設定を見つけられず、フォールバックが一切働かない。
 - **`autoFallback: { providers, freeOnly, unavailableMs }`**（`v2.js`）。フォールバック先に、サーバーがその時点で一覧に出しているモデル（`providers` のもの。`freeOnly` が既定の true なら無料のものだけ、ツールが使えて active なもの）を、`fallbackModels` の後ろに新しい順で足す。モデルが増えたり消えたりしても設定を直さなくてよい。
   - `fallbackModels` に書いたものでも、一覧にないものは飛ばす（優先順のヒントとして使うだけ）。
+  - 失敗したら、`fallbackModels` の先頭から順に試す（セッションのモデルの位置から回すのではない）。
   - 「Model is unavailable」などモデル自体が使えないという失敗をしたモデルは、`unavailableMs`（既定 6 時間）のあいだチェーンから外す。
+  - 「Free usage limit reached」（Zen の無料枠。IP ごと）が出たら、そのプロバイダーの無料モデルをすべて `freeLimitMs`（既定 30 分）のあいだ外す。
+    どれを試しても同じ答えが返るだけなので。
+  - 使えるモデルが残っていなければ、待たずにすぐ失敗として返す（以前は待ち時間を倍にしながら試し続け、ブリッジが 10 分超の待ちで打ち切るまで 15 分ほどかかった）。
   - 普通のプロンプトの前に、セッションのモデルが一覧にないか、使えないと分かっているなら、先に使えるモデルへ切り替える（失敗してから切り替えるのではなく）。
