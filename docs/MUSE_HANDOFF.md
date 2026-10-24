@@ -10,7 +10,7 @@ Muse（<@U0CCCH69XMW>）にはプロンプトでしか頼めないので、VM �
 | 1 | Muse に依頼 | clone → `install` → `keygen`。公開鍵 `osc-pub1:…` と環境情報を返してもらう |
 | 2 | Mac | 公開鍵に向けてトークンを暗号化（`osc-sealed1:…` の 1 行ができる） |
 | 3 | Muse に依頼 | `import` → `check`。結果を返してもらう |
-| 4 | Mac | 旧ボットを停止（同じ Slack アプリで 2 つ動くと、イベントが 2 つに振り分けられて両方おかしくなる） |
+| 4 | Mac | 旧ボットを停止（同じ Slack アプリで 2 つ動くと、イベントが 2 つに振り分けられて両方おかしくなる）。**2026-10-24 に済み** |
 | 5 | Muse に依頼 | `start --cutover` |
 | 6 | Slack | ボットにメンションして返事が来るか見る |
 
@@ -70,17 +70,20 @@ check の出力をそのまま返信してください（秘密の値は出ま�
 - `✓ model answers — opencode-go/deepseek-v4.1-flash, N s`: VM からモデルを呼べる。テスト用のセッションは削除される。
 - `· GitHub CLI — logged in as …`: ボットはこのアカウントで GitHub を操作する。Muse と同じアカウントなら、その前提でよいか判断する。
 
-## Mac 側: 旧ボットを止める
+## Mac 側: 旧ボットを止める（2026-10-24 に済み）
+
+実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、
+その接続先の opencode2 サーバー `ai.opencode.v2-service`（つないでいたのはブリッジだけ）を止めた。ログイン時に戻らないよう、
+plist は消さずに `.plist.disabled` にリネームしてある。Slack の `users.getPresence` で、ボットの接続数が 0 になったことも確認済み。
 
 ```sh
-# ボットが実行中のターンを持っていないこと（{} なら空）
-curl -s -u "opencode:$(node -p 'require(process.env.HOME+"/.local/state/opencode/service.json").password')" \
-  "$(node -p 'require(process.env.HOME+"/.local/state/opencode/service.json").url')/api/session/active"
-cd ~/work/opencode-slack-channel && ./launchd/install.sh uninstall
-launchctl print gui/$(id -u)/com.azumag.opencode-slack-channel 2>&1 | head -1   # 「Could not find service」なら停止済み
+uid=$(id -u); cd ~/Library/LaunchAgents
+for l in com.azumag.opencode-slack-channel ai.opencode.v2-service; do
+  launchctl bootout gui/$uid/$l; mv -n $l.plist $l.plist.disabled
+done
 ```
 
-Mac の opencode サーバー（`ai.opencode.v2-service`）は止めない（ボット以外も使う）。
+Mac の opencode v1 web（`ai.opencode.web`、`*:4096`）と OpenCodeGoMeter はボットとは別物なので、動かしたまま。
 
 ## 依頼文 3（切り替え）
 
@@ -98,7 +101,14 @@ Mac の opencode サーバー（`ai.opencode.v2-service`）は止めない（ボ
 <@U0CCCH69XMW> ~/opencode-slack-channel/deploy/linux/setup.sh stop を実行して、出力を返信してください。
 ```
 
-そのあと Mac で `cd ~/work/opencode-slack-channel && ./launchd/install.sh`。
+そのあと Mac で（サーバーを先に。ブリッジは起動時にサーバーへつなぐ）:
+
+```sh
+uid=$(id -u); cd ~/Library/LaunchAgents
+for l in ai.opencode.v2-service com.azumag.opencode-slack-channel; do
+  mv -n $l.plist.disabled $l.plist && launchctl bootstrap gui/$uid $l.plist
+done
+```
 
 ## Mac 版との違い（移すと変わること）
 
