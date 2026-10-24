@@ -403,6 +403,12 @@ Claude キットとの違いは、プロキシの写しを直接試すこと（c
 - `start-saved` の手動実行は `not wanted`（切り替え前なので正しい）。Muse の cron ジョブ `opencode-bot-autorecover`（10 分ごと）を登録済み。
 - 残りは依頼文 3（切り替え）だけ。Mac 側のブリッジと v2 サーバーは止まったまま（plist は `.disabled`、プロセスなし）。
 
+## 2026-10-25: 切り替え（依頼文 3）の結果
+
+owner の OK を受けて Muse が実行。01:32:48（VM の時刻）にブリッジが起動し、`slack identity: @opencode (U0C9Y2F2HEV, bot B0C9ZRNQZV2)`、
+`running`、01:32:50 に `socket connected (num_connections=1)`（この Slack アプリの接続は VM の 1 本だけ）。Muse の cron
+`opencode-bot-autorecover` は、この時点から `bridge-wanted` を見て動く。
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、
