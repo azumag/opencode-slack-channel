@@ -352,21 +352,43 @@ proxy_codes() { curl -s -o /dev/null --max-time 20 -x "$1" -w '%{http_connect} %
 proxy_refused() { case "$1" in 401\ *|403\ *|407\ *|000\ 401|000\ 403|000\ 407) return 0 ;; esac; return 1; }
 proxy_passes() { case "$1" in 200\ *|000\ 200) return 0 ;; esac; return 1; }
 
-# Muse's VM hands out new proxy credentials, and the copy in the env file can stop working. A running
-# bridge does not notice (its Slack socket was opened earlier) but every new connection of the opencode
-# server (the models) is refused. 0 when the proxy refuses the copy (asked twice) and lets this shell's
-# settings through, i.e. when net-refresh helps. Sets PROBE_NOTE to the codes seen.
+# Where the services' proxy settings come from. On Muse's VM every shell (each login, each run of a Muse
+# cron job) gets its own proxy credentials, and a cron run's are refused (407) within minutes of the run;
+# /etc/environment holds the ones written when the VM booted, and those kept working (2026-10-25: a copy
+# from a cron run was refused 4 minutes later, /etc/environment's still passed 80 minutes after boot).
+# So /etc/environment wins when it has a proxy that gets through; this shell's settings otherwise.
+NET_SOURCE="this shell"
+etc_env_get() { sed -n "s/^$1=//p" /etc/environment 2>/dev/null | tail -n 1 | sed 's/^"//; s/"$//'; }
+
+use_etc_environment() { # export /etc/environment's network settings over this shell's, if its proxy gets through
+  local p name value
+  p="$(etc_env_get https_proxy)"; [ -n "$p" ] || p="$(etc_env_get HTTPS_PROXY)"
+  [ -n "$p" ] || return 1
+  if command -v curl >/dev/null 2>&1; then proxy_passes "$(proxy_codes "$p")" || return 1; fi
+  for name in $NET_VARS; do
+    value="$(etc_env_get "$name")"
+    if [ -n "$value" ]; then export "$name=$value"; fi
+  done
+  NET_SOURCE=/etc/environment
+}
+
+# The copy in the env file can stop working. A running bridge does not notice (its Slack socket was
+# opened earlier) but every new connection of the opencode server (the models) is refused. 0 when the
+# proxy refuses the copy (asked twice) and lets other settings through — /etc/environment's, or this
+# shell's — which are then exported for net-refresh. Sets PROBE_NOTE to the codes seen.
 env_proxy_stale() {
   command -v curl >/dev/null 2>&1 || return 1
   local f s env_codes shell_codes
   f="$(env_get https_proxy)"; [ -n "$f" ] || f="$(env_get HTTPS_PROXY)"
-  s="${https_proxy:-${HTTPS_PROXY:-}}"
-  [ -n "$f" ] && [ -n "$s" ] && [ "$f" != "$s" ] || return 1
+  [ -n "$f" ] || return 1
   env_codes="$(proxy_codes "$f")"
   proxy_refused "$env_codes" || return 1
   sleep 3
   env_codes="$(proxy_codes "$f")"
   proxy_refused "$env_codes" || return 1
+  if use_etc_environment; then PROBE_NOTE="env file's: CONNECT/HTTP $env_codes; /etc/environment's pass"; return 0; fi
+  s="${https_proxy:-${HTTPS_PROXY:-}}"
+  [ -n "$s" ] && [ "$s" != "$f" ] || return 1
   shell_codes="$(proxy_codes "$s")"
   PROBE_NOTE="env file's: CONNECT/HTTP $env_codes; this shell's: $shell_codes"
   proxy_passes "$shell_codes"
@@ -422,10 +444,11 @@ EOF
   [ -n "$kept_git" ] && printf '%s\n' "$kept_git" >> "$ENV_FILE"
   # A service starts without this shell's proxy settings. Where direct egress is blocked (Muse's VM
   # answers https on :443 with plain text) opencode then reaches neither the models nor their catalog.
+  use_etc_environment || true
   write_net_env "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   say "supervisor: $mode"
-  if [ "${#NET_NAMES[@]}" -gt 0 ]; then say "network settings taken from this shell (values not shown): ${NET_NAMES[*]}"
+  if [ "${#NET_NAMES[@]}" -gt 0 ]; then say "network settings taken from $NET_SOURCE (values not shown): ${NET_NAMES[*]}"
   else say "no proxy settings in this shell: the services connect directly"; fi
 
   step "opencode config ($OC_CONFIG)"
@@ -510,6 +533,7 @@ cmd_import() {
 cmd_net_refresh() {
   [ -f "$ENV_FILE" ] || die "$ENV_FILE not found — run: $SELF install"
   local tmp="$ENV_FILE.tmp" pattern
+  use_etc_environment || true
   if ! shell_has_net && env_has_proxy; then
     die "this shell has no proxy settings but $ENV_FILE has some — run this from the shell whose proxy works"
   fi
@@ -518,7 +542,7 @@ cmd_net_refresh() {
   grep -vE "$pattern" "$ENV_FILE" >> "$tmp" || true
   write_net_env "$tmp"
   mv "$tmp" "$ENV_FILE"
-  if [ "${#NET_NAMES[@]}" -gt 0 ]; then say "network settings taken from this shell (values not shown): ${NET_NAMES[*]}"
+  if [ "${#NET_NAMES[@]}" -gt 0 ]; then say "network settings taken from $NET_SOURCE (values not shown): ${NET_NAMES[*]}"
   else say "no proxy settings in this shell or the env file: direct connections"; fi
   load_env
   if opencode_running; then
@@ -551,8 +575,9 @@ cmd_netcheck() {
     case "$s" in *://*@*) out="$out; shell value has user:pass@" ;; esac
     case "$f" in *://*@*) out="$out; env file value has user:pass@" ;; esac
     if [ -z "$e" ]; then out="$out; not in /etc/environment"
+    elif [ "$e" = "$f" ]; then out="$out; /etc/environment = env file"
     elif [ "$e" = "$s" ]; then out="$out; /etc/environment = shell"
-    else out="$out; /etc/environment differs from the shell"; fi
+    else out="$out; /etc/environment differs from both"; fi
     say "$v: $out"
   done
   [ "$any" = 1 ] || say "no proxy settings in this shell or the env file"
@@ -708,20 +733,21 @@ cmd_start_saved() {
   mkdir -p "$LOG_DIR"
   since="$(date -u +%FT%T)"
   if bridge_running && opencode_running; then
-    if env_proxy_stale; then why="the proxy refuses the env file's settings and lets this shell's through ($PROBE_NOTE)"
+    if env_proxy_stale; then why="the proxy refuses the env file's settings ($PROBE_NOTE)"
     elif socket_failing; then why="the bridge cannot reach Slack (last connection attempts failed)"
     else say "start-saved: running — nothing to do"; return 0; fi
     shell_has_net || die_saved "start-saved: $why and this shell has no proxy settings to give it"
-    record "start-saved: RESTARTING — $why; taking this shell's proxy settings"
+    record "start-saved: RESTARTING — $why; taking $NET_SOURCE's proxy settings"
     cmd_net_refresh
   else
+    use_etc_environment || true
     if ! shell_has_net && env_has_proxy; then
       record "start-saved: RECOVERING — the bot should run but does not; this shell has no proxy settings, so the env file's are kept"
       opencode_running || service_start opencode
       load_env
       wait_for_opencode || die_saved "start-saved: the opencode server did not come up — $SELF logs opencode"
     else
-      record "start-saved: RECOVERING — the bot should run but does not; install again (configs kept, log $LOG_DIR/start-saved.log), then start"
+      record "start-saved: RECOVERING — the bot should run but does not; install again (configs kept, proxy settings from $NET_SOURCE, log $LOG_DIR/start-saved.log), then start"
       ver="$(OPENCODE_CONFIG_DIR="$OC_CONFIG" XDG_DATA_HOME="$XDG_DIR/data" XDG_STATE_HOME="$XDG_DIR/state" XDG_CACHE_HOME="$XDG_DIR/cache" \
         "$OC_BIN" --version 2>/dev/null | sed -n 's/^opencode v//p' || true)"
       if ! OPENCODE_VERSION="${ver:-$OPENCODE_VERSION}" "$SELF" install > "$LOG_DIR/start-saved.log" 2>&1; then

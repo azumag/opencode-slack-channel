@@ -366,8 +366,10 @@ node deploy/secrets.mjs seal 'osc-pub1:…' --go-key ~/.local/share/opencode/aut
 |---|---|---|
 | `start --cutover` 以降に `stop` した、または一度も起動していない | 何もしない（止めたボットは生き返らせない） | `start-saved: not wanted …` |
 | 両方のサービスが動いていて、Slack につながっていて、プロキシの写しも通る | 何もしない | `start-saved: running — nothing to do` |
-| どちらかが動いていない（作り直しでサービス定義が消えた等） | install をやり直す（設定・API キー・トークン・opencode のバージョンはそのまま、プロキシ設定は実行したシェルから写し直す）→ ブリッジを起動 | `start-saved: RECOVERING …` |
-| 動いているが、プロキシが環境ファイルの写しを 401/403/407 で断り（2 回試す）、シェルの設定なら通す（または直近 3 回の Slack 接続がすべて失敗） | シェルのプロキシ設定を写し直して両方を再起動。断られたときのコードも出す | `start-saved: RESTARTING …` |
+| どちらかが動いていない（作り直しでサービス定義が消えた等） | install をやり直す（設定・API キー・トークン・opencode のバージョンはそのまま、プロキシ設定は写し直す ※）→ ブリッジを起動 | `start-saved: RECOVERING …` |
+| 動いているが、プロキシが環境ファイルの写しを 401/403/407 で断り（2 回試す）、ほかの設定なら通す（または直近 3 回の Slack 接続がすべて失敗） | プロキシ設定を写し直して（※）両方を再起動。断られたときのコードも出す | `start-saved: RESTARTING …` |
+
+※ 写すのは、`/etc/environment` の設定がプロキシを通ればそちら、通らなければ実行したシェルのもの（下の「10 分ごとの RESTARTING」を参照。最初は常にシェルのものだった）。
 
 最後は `start-saved: done — the bot is running and connected`（失敗なら `error:` で始まる行、終了コード 1）。
 Claude キットとの違いは、プロキシの写しを直接試すこと（curl で Slack の `api.test`）。ブリッジの Slack 接続は前から開いたまま
@@ -423,6 +425,46 @@ Muse の cron の 2 回目（切り替え後の初回）で `RESTARTING — the 
   RESTARTING の行に、写しとシェルそれぞれの CONNECT / HTTP のコードを出す。
 - start-saved が動いたときの行を `~/.opencode-slack/logs/start-saved.history` に残し、`setup.sh status` で直近 5 件を出す。
 - netcheck の CONNECT の試験に、`/etc/environment` の設定（起動時に書かれる）も加えた。
+
+## 2026-10-25: 10 分ごとの RESTARTING — cron のシェルの認証情報はすぐ断られる
+
+01:39 のあとも 01:49・01:59・02:09 と cron のたびに RESTARTING（4 回連続）。02:09 の行のコードは、写しが `CONNECT/HTTP 407 000`、
+シェルが `200 200`。401/403/407 だけを数える判定でも 407 なので、写しは本当に断られていた。owner は VM のまま動かして調べることにし、
+Muse の調査（b7718af の netcheck ほか）でわかったこと:
+
+- 環境ファイルの写しは CONNECT 407、Node の fetch も gh も失敗。写しは 16:49:53 UTC（cron の RESTARTING）に書かれたもので、
+  調べた 16:53:16 UTC にはもう断られていた。
+- いまのシェルと `/etc/environment` の設定は CONNECT 200。`/etc/environment` は 15:32:04 UTC（VM の起動時）に書かれ、
+  80 分以上たっても通る。Claude ボットの写し（00:34 に Muse のふだんのシェルで install）も通ったまま。
+- `/etc/profile.d/hatch-egress.sh` は固定の `export` だけ。CA は `/run/hatch/egress-tls/ca-bundle.pem`。認証情報の単位・
+  有効期間・デーモンからの外向き通信について書かれたものは見つからなかった。
+- cron の履歴: 01:29:47 は報告なし、01:39:47 と 01:49:47 が RESTARTING。
+
+シェルごとに別の認証情報が配られ、cron ジョブのシェルのものは数分で断られる（ジョブが終わると無効になるのかもしれないが、未確認）。
+start-saved が cron のシェルから写し直すと、その写しが数分後に断られ、次の cron がまた写し直す、という悪循環だった。
+その間、ブリッジの Slack 接続は開いたままだが、opencode のモデルへの新しい接続は断られる。
+
+直し方: サービスに渡すプロキシ設定は、`/etc/environment` のものがプロキシを通ればそちら、通らなければ実行したシェルのもの。
+install・`net-refresh`・`start-saved` のすべてで同じ。出力にどちらから写したかが出る（`network settings taken from /etc/environment`、
+`taking /etc/environment's proxy settings`）。netcheck には `/etc/environment = env file` が出る。コンテナの試験では、
+起動時の認証（ずっと通る）と cron の実行ごとの認証（次の実行では断られる）を分けて、次を確かめた: 作り直しのあとは `/etc/environment` の
+認証で戻る、cron の認証が切れても何もしない、`/etc/environment` が新しくなれば写し直す、`/etc/environment` も断られるときだけシェルのものを使う。
+
+```text
+<@U0CCCH69XMW> opencode ボットの続きです。調査ありがとうございました。原因は、cron ジョブのシェルから写したプロキシの認証情報が数分で断られることでした（写すたびに次の失効が始まる悪循環）。サービスには /etc/environment の認証情報（起動時に書かれ、長く通るもの）を渡すように直しました。次を順に実行して、出力を返信してください。ボットは動かしたままで大丈夫です（2 で一度だけ両方が再起動します）。
+
+1. 最新版を取得
+   cd ~/opencode-slack-channel && git pull --ff-only && git log -1 --oneline
+2. プロキシ設定を /etc/environment から写し直して両方を再起動（値は表示されません）
+   ~/opencode-slack-channel/deploy/linux/setup.sh net-refresh
+   → "network settings taken from /etc/environment" の行があることを確かめてください。
+3. ~/opencode-slack-channel/deploy/linux/setup.sh netcheck
+4. ~/opencode-slack-channel/deploy/linux/setup.sh check
+5. ~/opencode-slack-channel/deploy/linux/setup.sh status
+6. 30 分以上たってから（cron が 3 回以上動いたあと）、もう一度 5 を実行して、その出力も返信してください。
+
+cron ジョブ opencode-bot-autorecover はそのままにしてください。直っていれば、このあとの cron は "nothing to do" が続きます。RESTARTING が来たら、これまでどおり出力をそのまま owner に知らせてください。
+```
 
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
