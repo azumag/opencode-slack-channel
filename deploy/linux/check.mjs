@@ -4,7 +4,7 @@
 // elsewhere) and never prints a secret.
 //
 //   node check.mjs opencode                       exit 0 when the opencode server answers
-//   node check.mjs all [--model] --bot-config F --tokens F --auth F --opencode-bin F
+//   node check.mjs all [--model] --bot-config F --tokens F --opencode-bin F --opencode-log F
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, statSync } from 'node:fs'
@@ -35,29 +35,69 @@ async function slackCall(method, token) {
   return res.json()
 }
 
-/** One tiny turn through the same API the bridge uses; the session is deleted afterwards. */
-async function probeModel(opencode, config) {
+/** ERROR lines opencode wrote to its log after byte offset `from` (message + first line of the cause). */
+function logErrors(file, from) {
+  if (!file || !existsSync(file)) return []
+  const text = readFileSync(file, 'utf8').slice(from)
+  return text.split('\n').filter((line) => line.includes('level=ERROR')).map((line) => {
+    const message = line.match(/message="([^"]*)"/)?.[1] ?? ''
+    const cause = line.match(/cause="([^"\\]*)/)?.[1] ?? ''
+    return (message + (cause ? ': ' + cause : '')).slice(0, 300)
+  })
+}
+
+/**
+ * Seconds until the server lists the model (a fresh opencode only knows its built-in list until
+ * the models.dev catalog arrives, ~10 s after the first start), or -1 after 60 s.
+ */
+async function waitForModel(bin, model) {
+  const id = model.providerID + '/' + model.id
   const started = Date.now()
+  while (Date.now() - started < 60000) {
+    try {
+      const out = execFileSync(bin, ['models'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000 })
+      if (out.split('\n').some((line) => line.trim() === id)) return Math.round((Date.now() - started) / 1000)
+    } catch { /* server busy: try again */ }
+    await sleep(3000)
+  }
+  return -1
+}
+
+/** One tiny turn through the same API the bridge uses; the session is deleted afterwards. */
+async function probeModel(opencode, config, logFile) {
+  const started = Date.now()
+  const logFrom = logFile && existsSync(logFile) ? statSync(logFile).size : 0
   const body = { location: { directory: config.cwd }, metadata: { source: 'osc-check' } }
   if (config.model) body.model = config.model
   const session = await opencode.createSession(body)
   try {
     await opencode.prompt(session.id, 'Reply with exactly the word OK and nothing else. Do not use any tools.')
+    // Done when the turn ran and stopped, or it failed before running (opencode logs an ERROR),
+    // or it never started within 60 s. A running turn (fallbacks, retry waits) gets up to 240 s.
     let seenActive = false
     for (;;) {
       await sleep(2000)
-      const active = await opencode.activeSessionIds()
-      if (active.has(session.id)) seenActive = true
-      else if (seenActive || Date.now() - started > 8000) break
-      if (Date.now() - started > 240000) throw new Error('no answer within 240 s (rate limit wait or retry loop?)')
+      const elapsed = Date.now() - started
+      if ((await opencode.activeSessionIds()).has(session.id)) {
+        seenActive = true
+        if (elapsed > 240000) throw new Error('still running after 240 s (rate-limit waits or a fallback loop?)')
+        continue
+      }
+      if (seenActive || logErrors(logFile, logFrom).length > 0 || elapsed > 60000) break
+      if ((await opencode.messages(session.id)).some((m) => m.type === 'assistant' && m.time?.completed)) break
     }
     const last = (await opencode.messages(session.id)).find((m) => m.type === 'assistant')
     const text = (last?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join(' ').trim()
     const used = last?.model ? last.model.providerID + '/' + last.model.id : '?'
     const secs = Math.round((Date.now() - started) / 1000)
     if (/\bOK\b/.test(text)) ok('model answers', used + ', ' + secs + ' s')
-    else if (!last) bad('model answers', 'no assistant message after ' + secs + ' s — provider error? see: setup.sh logs opencode')
+    else if (!last) bad('model answers', 'no reply after ' + secs + ' s')
     else bad('model answers', used + ' replied "' + text.slice(0, 80) + '" (finish ' + (last.finish ?? 'none') + ')')
+    if (!/\bOK\b/.test(text)) {
+      const errors = logErrors(logFile, logFrom)
+      if (errors.length === 0) note('opencode log', 'no ERROR lines in ' + logFile)
+      for (const line of errors.slice(-3)) note('opencode log', line)
+    }
   } finally {
     try { await opencode.request('DELETE', '/api/session/' + session.id) } catch { /* best effort */ }
   }
@@ -109,17 +149,8 @@ if (config) {
   }
 }
 
-let authProviders = []
-if (existsSync(opts.auth)) {
-  const mode = statSync(opts.auth).mode & 0o077
-  authProviders = Object.keys(JSON.parse(readFileSync(opts.auth, 'utf8')))
-  if (mode !== 0) bad('opencode auth', opts.auth + ' is readable by others (chmod 600)')
-  else ok('opencode auth', 'providers: ' + authProviders.join(', '))
-} else {
-  note('opencode auth', 'none (only anonymous Zen free models will work)')
-}
-if (config?.model && config.model.providerID !== 'opencode' && !authProviders.includes(config.model.providerID)) {
-  bad('model credentials', config.model.providerID + ' is the bot model but has no key in ' + opts.auth)
+if (config?.model && config.model.providerID !== 'opencode') {
+  note('model credentials', config.model.providerID + ' needs a key in opencode (opencode2 auth login); only Zen free models work without one')
 }
 
 if (config) {
@@ -142,18 +173,25 @@ try {
 } catch {
   note('GitHub CLI', 'gh missing or not logged in — the bot cannot use GitHub until it is')
 }
-for (const key of ['user.name', 'user.email']) {
+for (const [key, envName] of [['user.name', 'GIT_AUTHOR_NAME'], ['user.email', 'GIT_AUTHOR_EMAIL']]) {
+  if (process.env[envName]) {
+    note('git ' + key, process.env[envName] + ' (bot env)')
+    continue
+  }
   try {
     execFileSync('git', ['config', '--global', key], { stdio: 'ignore' })
-    note('git ' + key, 'set')
+    note('git ' + key, 'set in ~/.gitconfig')
   } catch {
-    note('git ' + key, 'not set — commits by the bot will fail')
+    note('git ' + key, 'not set — commits by the bot will fail (setup.sh git-identity)')
   }
 }
 
 if (opts.model && opencode && config) {
   try {
-    await probeModel(opencode, config)
+    const waited = config.model ? await waitForModel(opts['opencode-bin'], config.model) : 0
+    if (waited < 0) throw new Error(config.model.providerID + '/' + config.model.id + ' is not in the server\'s model list after 60 s (opencode2 models)')
+    if (waited > 0) note('model list', 'the model appeared after ' + waited + ' s (fresh server)')
+    await probeModel(opencode, config, opts['opencode-log'])
   } catch (error) {
     bad('model answers', errText(error))
   }

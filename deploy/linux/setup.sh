@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Set up the opencode Slack bot on a Linux machine from a fresh clone.
 #
-#   deploy/linux/setup.sh install            Node + opencode CLI + configs + services; starts the opencode
-#                                            server only (never the Slack bridge)
+#   deploy/linux/setup.sh install [--reconfigure]   Node + opencode CLI + configs + services; starts the
+#                                            opencode server only (never the Slack bridge). --reconfigure
+#                                            rewrites the configs from the templates (old ones kept as .bak-*)
 #   deploy/linux/setup.sh keygen             print a one-line public key for the secrets handoff
-#   deploy/linux/setup.sh import <blob>      open the sealed secrets (Slack tokens, opencode auth)
+#   deploy/linux/setup.sh import <blob>      open the sealed secrets (the Slack tokens)
 #   deploy/linux/setup.sh check [--no-model] verify everything without connecting to Slack's socket
+#   deploy/linux/setup.sh git-identity "<name>" <email>   who the bot's commits are by (not ~/.gitconfig)
 #   deploy/linux/setup.sh start --cutover    start the Slack bridge (only once the old bot is stopped)
 #   deploy/linux/setup.sh stop [--all]       stop the bridge (--all: the opencode server too)
 #   deploy/linux/setup.sh status | logs [bridge|opencode] | uninstall
 #
-# Everything the bot owns lives in $OSC_HOME (default ~/.opencode-slack). opencode runs with its own
-# XDG dirs there, so an existing ~/.config/opencode on this machine is never read or changed.
+# Everything the bot owns lives in $OSC_HOME (default ~/.opencode-slack). opencode gets its own config
+# dir (OPENCODE_CONFIG_DIR) and data/state/cache dirs there, so an existing ~/.config/opencode on this
+# machine is never read or changed. XDG_CONFIG_HOME itself stays as it is: the agent's tools (gh, git, …)
+# inherit opencode's environment and must still find their own config in ~/.config.
 #
 # Environment overrides: OSC_HOME, OSC_PORT (default 4196), NODE_VERSION (v24.22.1),
 # OPENCODE_VERSION (2.0.31), OSC_SUPERVISOR (user | system | manual).
@@ -27,7 +31,6 @@ OPENCODE_VERSION="${OPENCODE_VERSION:-2.0.31}"
 
 XDG_DIR="$OSC_HOME/xdg"
 OC_CONFIG="$XDG_DIR/config/opencode"
-OC_AUTH="$XDG_DIR/data/opencode/auth.json"
 OC_BIN="$OSC_HOME/opencode-cli/bin/opencode2"
 BOT_CONFIG_DIR="$HOME/.config/opencode-slack-channel"
 BOT_CONFIG="$BOT_CONFIG_DIR/config.json"
@@ -115,10 +118,14 @@ install_node() {
   rm -rf "$tmp"
 }
 
-# Fill @OSC_HOME@ in a template; never overwrite a file that already exists.
+# Fill @OSC_HOME@ in a template. An existing file is kept, unless --reconfigure (then backed up).
+RECONFIGURE=0
 render() { # template dest [mode]
   local src="$1" dest="$2" mode="${3:-644}"
-  if [ -e "$dest" ]; then say "kept existing $dest"; return; fi
+  if [ -e "$dest" ]; then
+    if [ "$RECONFIGURE" = 0 ]; then say "kept existing $dest"; return; fi
+    mv "$dest" "$dest.bak-$(date +%Y%m%d-%H%M%S)"
+  fi
   mkdir -p "$(dirname "$dest")"
   sed "s|@OSC_HOME@|$OSC_HOME|g" "$src" > "$dest.tmp"
   chmod "$mode" "$dest.tmp"
@@ -247,10 +254,11 @@ wait_for_opencode() {
 
 cmd_install() {
   [ "$(uname -s)" = Linux ] || die "this script is for Linux (on macOS use ./launchd/install.sh)"
+  case "${1:-}" in --reconfigure) RECONFIGURE=1 ;; "") ;; *) die "usage: $SELF install [--reconfigure]" ;; esac
   mkdir -p "$OSC_HOME" "$LOG_DIR"
   chmod 700 "$OSC_HOME"
   # Even `opencode2 --version` writes logs: keep every call inside $OSC_HOME.
-  export XDG_CONFIG_HOME="$XDG_DIR/config" XDG_DATA_HOME="$XDG_DIR/data" XDG_STATE_HOME="$XDG_DIR/state" XDG_CACHE_HOME="$XDG_DIR/cache"
+  export OPENCODE_CONFIG_DIR="$OC_CONFIG" XDG_DATA_HOME="$XDG_DIR/data" XDG_STATE_HOME="$XDG_DIR/state" XDG_CACHE_HOME="$XDG_DIR/cache"
 
   step "Node >= 22"
   local node
@@ -270,20 +278,27 @@ cmd_install() {
   local mode; mode="$(supervisor)"
   echo "$mode" > "$OSC_HOME/supervisor"
   # The agent's shell tools inherit this PATH: keep the installing user's PATH (git, gh, …) after ours.
+  # HOME too: systemd gives a unit the passwd home of its User=, which is not always where this was
+  # installed (root with HOME=/home/<user>), and the bridge and gh/git all look under HOME.
+  # A git identity set with `git-identity` survives a re-install.
+  local kept_git=""
+  [ -f "$ENV_FILE" ] && kept_git="$(grep -E '^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)=' "$ENV_FILE" || true)"
   cat > "$ENV_FILE" <<EOF
+HOME=$HOME
 PATH=$OSC_HOME/opencode-cli/bin:$(dirname "$node"):$PATH
-XDG_CONFIG_HOME=$XDG_DIR/config
+OPENCODE_CONFIG_DIR=$OC_CONFIG
 XDG_DATA_HOME=$XDG_DIR/data
 XDG_STATE_HOME=$XDG_DIR/state
 XDG_CACHE_HOME=$XDG_DIR/cache
 OSC_HOME=$OSC_HOME
 OSC_NODE=$node
 EOF
+  [ -n "$kept_git" ] && printf '%s\n' "$kept_git" >> "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   say "supervisor: $mode"
 
   step "opencode config ($OC_CONFIG)"
-  mkdir -p "$XDG_DIR"/{config,data,state,cache}/opencode
+  mkdir -p "$OC_CONFIG" "$XDG_DIR"/{data,state,cache}/opencode
   rm -rf "$OSC_HOME/plugins/opencode-rate-limit-fallback" "$OSC_HOME/agent-guards"
   mkdir -p "$OSC_HOME/plugins"
   cp -R "$REPO_DIR/vendor/opencode-rate-limit-fallback" "$OSC_HOME/plugins/"
@@ -318,7 +333,13 @@ EOF
     say "no usable systemd: services run as background loops (logs in $LOG_DIR). They do NOT start again after a"
     say "reboot by themselves — add to crontab:  @reboot $SELF start-saved"
   fi
-  service_start opencode
+  if opencode_running && ! bridge_running; then
+    service_restart_opencode
+  elif opencode_running; then
+    say "the bridge is running: opencode keeps its old environment until the next restart"
+  else
+    service_start opencode
+  fi
   load_env
   if wait_for_opencode; then say "opencode server is up"; else die "opencode server did not come up — see: $SELF logs opencode"; fi
 
@@ -338,9 +359,31 @@ cmd_keygen() {
 cmd_import() {
   [ -n "${1:-}" ] || die "usage: $SELF import <osc-sealed1:…>"
   load_env
-  "$OSC_NODE" "$REPO_DIR/deploy/secrets.mjs" open "$HANDOFF_KEY" "$1" --tokens-out "$BOT_TOKENS" --auth-out "$OC_AUTH"
-  # opencode reads auth.json at startup; the bridge is not running yet, so nothing is interrupted.
-  if ! bridge_running; then service_restart_opencode; wait_for_opencode || die "opencode did not come back after the restart"; say "opencode restarted with the new credentials"; fi
+  "$OSC_NODE" "$REPO_DIR/deploy/secrets.mjs" open "$HANDOFF_KEY" "$1" --tokens-out "$BOT_TOKENS"
+}
+
+# The bot's commits only: GIT_AUTHOR_*/GIT_COMMITTER_* in the env file. ~/.gitconfig is not touched,
+# so whoever else uses git on this machine keeps their own identity.
+cmd_git_identity() {
+  local name="${1:-}" email="${2:-}" kind tmp
+  [ -n "$name" ] && [ -n "$email" ] || die "usage: $SELF git-identity \"<name>\" <email>"
+  case "$name$email" in *[\"\\\$\`]*|*$'\n'*) die "name/email must not contain quotes, backslashes, \$, backticks or newlines" ;; esac
+  load_env
+  tmp="$ENV_FILE.tmp"
+  grep -vE '^GIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)=' "$ENV_FILE" > "$tmp" || true
+  for kind in AUTHOR COMMITTER; do
+    printf 'GIT_%s_NAME="%s"\nGIT_%s_EMAIL="%s"\n' "$kind" "$name" "$kind" "$email" >> "$tmp"
+  done
+  chmod 600 "$tmp"
+  mv "$tmp" "$ENV_FILE"
+  say "bot git identity: $name <$email> (in $ENV_FILE; ~/.gitconfig untouched)"
+  if bridge_running; then
+    say "the bridge is running: this takes effect at the next opencode restart"
+  else
+    service_restart_opencode
+    wait_for_opencode || die "opencode did not come back after the restart"
+    say "opencode restarted with the identity"
+  fi
 }
 
 bridge_running() {
@@ -350,12 +393,19 @@ bridge_running() {
   esac
 }
 
+opencode_running() {
+  case "$(supervisor)" in
+    manual) manual_running "$UNIT_OPENCODE" ;;
+    *) sctl is-active --quiet "$UNIT_OPENCODE.service" ;;
+  esac
+}
+
 cmd_check() {
   load_env
   local args=()
   [ "${1:-}" = --no-model ] || args+=(--model)
   "$OSC_NODE" "$REPO_DIR/deploy/linux/check.mjs" all "${args[@]}" \
-    --bot-config "$BOT_CONFIG" --tokens "$BOT_TOKENS" --auth "$OC_AUTH" --opencode-bin "$OC_BIN"
+    --bot-config "$BOT_CONFIG" --tokens "$BOT_TOKENS" --opencode-bin "$OC_BIN" --opencode-log "$XDG_DIR/data/opencode/log/opencode.log"
 }
 
 cmd_start() {
@@ -413,9 +463,10 @@ cmd_uninstall() {
 }
 
 case "${1:-}" in
-  install) cmd_install ;;
+  install) shift; cmd_install "$@" ;;
   keygen) cmd_keygen ;;
   import) shift; cmd_import "$@" ;;
+  git-identity) shift; cmd_git_identity "$@" ;;
   check) shift; cmd_check "$@" ;;
   start) shift; cmd_start "$@" ;;
   start-saved) cmd_start_saved ;;
@@ -423,5 +474,5 @@ case "${1:-}" in
   status) cmd_status ;;
   logs) shift; cmd_logs "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  *) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
