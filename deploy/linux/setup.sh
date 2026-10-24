@@ -78,11 +78,17 @@ download() { # url → stdout
 
 node_major() { "$1" -e 'process.stdout.write(String(process.versions.node.split(".")[0]))' 2>/dev/null || echo 0; }
 
+# A Node >= 22 with npm in the same directory (npm installs the opencode CLI). Images that keep npm
+# elsewhere (e.g. node in /usr/bin, npm in /opt/…/bin) get our own Node instead of a mixed pair.
 find_node() {
-  local cand
+  local cand real
   for cand in "$OSC_HOME/node/bin/node" "$(command -v node 2>/dev/null || true)"; do
     [ -n "$cand" ] && [ -x "$cand" ] || continue
-    if [ "$(node_major "$cand")" -ge 22 ]; then readlink -f "$cand"; return 0; fi
+    [ "$(node_major "$cand")" -ge 22 ] || continue
+    real="$(readlink -f "$cand")"
+    if [ -x "$(dirname "$real")/npm" ]; then printf '%s\n' "$real"; return 0; fi
+    if [ -x "$(dirname "$cand")/npm" ]; then printf '%s\n' "$cand"; return 0; fi
+    printf 'not using %s: no npm next to it\n' "$cand" >&2
   done
   return 1
 }
@@ -255,7 +261,7 @@ cmd_install() {
   if [ -x "$OC_BIN" ] && [ "$("$OC_BIN" --version 2>/dev/null)" = "opencode v$OPENCODE_VERSION" ]; then
     say "already installed"
   else
-    PATH="$(dirname "$node"):$PATH" npm_config_cache="$XDG_DIR/cache/npm" "$(dirname "$node")/npm" install -g --no-fund --no-audit \
+    PATH="$(dirname "$node"):$PATH" npm_config_cache="$XDG_DIR/cache/npm" "$(dirname "$node")/npm" install -g --no-fund --no-audit --allow-scripts=@opencode/cli \
       --prefix "$OSC_HOME/opencode-cli" "@opencode/cli@$OPENCODE_VERSION"
   fi
   say "$("$OC_BIN" --version) at $OC_BIN"
