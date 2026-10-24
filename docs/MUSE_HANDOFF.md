@@ -342,6 +342,15 @@ node deploy/secrets.mjs seal 'osc-pub1:…' --go-key ~/.local/share/opencode/aut
 両方の出力を返信してください。
 ```
 
+## 2026-10-25: netcheck の結果（(7) の前半）
+
+- 6 つのプロキシ変数すべてで、環境ファイルの写し（(5) の install のとき）とシェルの値が **DIFFERENT**。どちらも URL に認証情報が入っている。
+  → シェルのプロキシの値は時間とともに変わる（確認済み）。設定元は `/etc/environment` と `/etc/profile.d/hatch-egress.sh`。
+- ただしこのときは、古い写しも新しい値も、curl では slack.com / api.github.com に CONNECT 200 で通った。古い値がいつまで通るのかは分からない。
+  (6) で check（Node の fetch と gh）が失敗した理由は、まだ説明できていない（期限切れ、それとも Node や gh の読み方の違い）。
+- netcheck に足した: 環境ファイル経由とシェル経由の両方で Node の fetch と gh を試す（サービスが使うのはこちら）。
+  `/etc/environment` の値がシェルと同じかどうか、設定元のファイルと環境ファイルの更新時刻も出す。
+
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
 実行中のターンが無い（`/api/session/active` が空）ことを確かめてから、ブリッジ `com.azumag.opencode-slack-channel` と、

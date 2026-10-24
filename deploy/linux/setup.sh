@@ -420,11 +420,12 @@ cmd_import() {
 # only, never a value.
 cmd_netcheck() {
   [ -f "$ENV_FILE" ] || die "$ENV_FILE not found — run: $SELF install"
-  local v s f label c rc out tried=" " any=0
-  step "proxy settings: this shell vs $ENV_FILE"
+  local v s f e label c rc out tried=" " any=0 node
+  step "proxy settings: this shell vs $ENV_FILE (and /etc/environment)"
   for v in https_proxy HTTPS_PROXY http_proxy HTTP_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY; do
     s="${!v-}"
     f="$(sed -n "s/^$v=//p" "$ENV_FILE" | tail -n 1)"; f="${f#\"}"; f="${f%\"}"
+    e="$(sed -n "s/^$v=//p" /etc/environment 2>/dev/null | tail -n 1)"; e="${e#\"}"; e="${e%\"}"
     case "$v" in no_proxy|NO_PROXY) f="${f%,127.0.0.1,localhost,::1}" ;; esac   # install appends loopback
     [ -n "$s$f" ] || continue
     any=1
@@ -434,6 +435,9 @@ cmd_netcheck() {
     else out="DIFFERENT"; fi
     case "$s" in *://*@*) out="$out; shell value has user:pass@" ;; esac
     case "$f" in *://*@*) out="$out; env file value has user:pass@" ;; esac
+    if [ -z "$e" ]; then out="$out; not in /etc/environment"
+    elif [ "$e" = "$s" ]; then out="$out; /etc/environment = shell"
+    else out="$out; /etc/environment differs from the shell"; fi
     say "$v: $out"
   done
   [ "$any" = 1 ] || say "no proxy settings in this shell or the env file"
@@ -452,10 +456,32 @@ cmd_netcheck() {
     done
   done
 
-  step "where this shell's proxy settings come from (file names only)"
+  # curl is not what the services use: the bridge and check are Node (NODE_USE_ENV_PROXY), the agent's
+  # tools include gh (Go). Each may read the same proxy URL differently.
+  step "Node fetch and gh through the env file (as the services) and through this shell"
+  node="$(sed -n 's/^OSC_NODE=//p' "$ENV_FILE" | tail -n 1)"
+  local probe='fetch("https://slack.com/api/api.test",{signal:AbortSignal.timeout(20000)}).then((r)=>console.log("HTTP "+r.status),(e)=>console.log("failed: "+(e.cause?.code??"")+" "+(e.cause?.message??e.message)))'
+  local scrub='s#[a-z][a-z0-9+.-]*://[^ ]*#<url>#g; s#[^ ]*@[^ ]*#<…>#g; s#[A-Za-z0-9._-]*:[0-9]{2,5}#<host:port>#g'
+  say "envfile node fetch → slack.com: $(env -i bash -c 'set -a; . "$0"; set +a; exec "$OSC_NODE" -e "$1"' "$ENV_FILE" "$probe" 2>&1 | tail -n 1 | sed -E "$scrub")"
+  say "shell   node fetch → slack.com: $(NODE_USE_ENV_PROXY=1 "$node" -e "$probe" 2>&1 | tail -n 1 | sed -E "$scrub")"
+  if command -v gh >/dev/null 2>&1; then
+    env -i bash -c 'set -a; . "$0"; set +a; exec gh api user --jq .login' "$ENV_FILE" >/dev/null 2>&1 && rc=0 || rc=$?
+    say "envfile gh api user: exit $rc"
+    gh api user --jq .login >/dev/null 2>&1 && rc=0 || rc=$?
+    say "shell   gh api user: exit $rc"
+  else
+    say "gh not on this shell's PATH"
+  fi
+
+  step "where this shell's proxy settings come from (file names and change times only)"
   out="$(grep -lsE '^[^#]*(https?_proxy|HTTPS?_PROXY|all_proxy|ALL_PROXY)' /etc/environment /etc/profile /etc/profile.d/* /etc/bash.bashrc \
     "$HOME/.bashrc" "$HOME/.profile" "$HOME/.bash_profile" "$HOME/.zshrc" 2>/dev/null || true)"
-  if [ -n "$out" ]; then say "$out"; else say "none of the usual profile files set them (the environment that runs this shell does)"; fi
+  if [ -n "$out" ]; then
+    while IFS= read -r f; do say "$f (changed $(date -u -r "$f" '+%Y-%m-%d %H:%M:%S UTC'))"; done <<< "$out"
+    say "now: $(date -u '+%Y-%m-%d %H:%M:%S UTC'); env file changed $(date -u -r "$ENV_FILE" '+%Y-%m-%d %H:%M:%S UTC')"
+  else
+    say "none of the usual profile files set them (the environment that runs this shell does)"
+  fi
 }
 
 # Drop the OpenCode Console logins (device login) stored in the bot's opencode, so that Zen sees only the
