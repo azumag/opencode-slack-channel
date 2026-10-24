@@ -61,7 +61,7 @@ git clone https://github.com/azumag/opencode-slack-channel.git ~/opencode-slack-
 ~/opencode-slack-channel/deploy/linux/setup.sh start --cutover   # 旧ボットを止めてから
 ```
 
-- sudo 不要。Node ≥ 22 が無ければ公式 tarball を検証して入れる。opencode は専用の XDG ディレクトリ（`~/.opencode-slack/xdg`）で動かすので、その機械の `~/.config/opencode` には触れない。
+- sudo 不要。Node ≥ 22 が無ければ公式 tarball を検証して入れる。opencode は専用の設定・データディレクトリ（`~/.opencode-slack/xdg`。`OPENCODE_CONFIG_DIR` と `XDG_DATA/STATE/CACHE_HOME`）で動かすので、その機械の `~/.config/opencode` には触れない。`XDG_CONFIG_HOME` は変えないので、ボットの中の gh / git は普段の `~/.config` を読む。
 - systemd のユーザーサービス（root なら system サービス）で常駐する。systemd が無ければバックグラウンドのループで動かし、再起動後の復帰用の crontab 行を表示する。
 - トークンは平文で運ばない。移設先が作った公開鍵に向けて、元の機械で `node deploy/secrets.mjs seal` で暗号化した 1 行を渡す。
 - 別の人（アシスタント）に頼んで移すときの手順と依頼文は [docs/MUSE_HANDOFF.md](docs/MUSE_HANDOFF.md)。

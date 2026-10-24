@@ -43,14 +43,12 @@ Muse が返してきた `osc-pub1:…` を使う。出力の `osc-sealed1:…` �
 
 ```sh
 cd ~/work/opencode-slack-channel
-node deploy/secrets.mjs seal 'osc-pub1:…' \
-  --tokens ~/.config/opencode-slack-channel/tokens.json \
-  --auth ~/.local/share/opencode/auth.json --provider opencode-go --provider opencode
+node deploy/secrets.mjs seal 'osc-pub1:…' --tokens ~/.config/opencode-slack-channel/tokens.json
 ```
 
-- `opencode-go`: ボットのモデル（`opencode-go/deepseek-v4.1-flash`）の鍵。
-- `opencode`: Zen の鍵（フォールバックの `x-preview-f-free` を Mac と同じアカウントで呼ぶため）。無くても Zen の無料モデルは匿名で動く。
-- `openai` / `openrouter` は渡さない（ボットは使っていない）。
+渡すのは Slack のトークン 2 つだけ。VM のボットは Zen の無料モデルだけを使うので、モデルの鍵は要らない（無料モデルは鍵なしで呼べる）。
+なお opencode v2 はモデルの鍵を `auth.json` ではなく自分の DB から読む。鍵が要るモデルにするなら、`opencode2 auth export --standalone <id>` /
+`auth import` で移す（OAuth の `opencode` は、リフレッシュトークンを 2 台で共有すると片方が切れうるので移さない）。
 
 ## 依頼文 2（トークンを入れて確認）
 
@@ -67,8 +65,36 @@ check の出力をそのまま返信してください（秘密の値は出ま�
 
 - `✓ Slack bot token — bot … (U0C9Y2F2HEV)`: 同じボットのトークンが入った。
 - `✓ Slack app token — Socket Mode URL issued (not connected)`: app トークンが有効。
-- `✓ model answers — opencode-go/deepseek-v4.1-flash, N s`: VM からモデルを呼べる。テスト用のセッションは削除される。
-- `· GitHub CLI — logged in as …`: ボットはこのアカウントで GitHub を操作する。Muse と同じアカウントなら、その前提でよいか判断する。
+- `✓ model answers — opencode/glm-5.3-flash-free, N s`: VM からモデルを呼べる。テスト用のセッションは削除される。失敗したら、
+  opencode のログ（`~/.opencode-slack/xdg/data/opencode/log/opencode.log`）の ERROR 行が `· opencode log —` として出る。
+- `· GitHub CLI — logged in as …`: ボットはこのアカウントで GitHub を操作する。
+- `· git user.name — … (bot env)`: ボットのコミットの名義。未設定なら
+  `setup.sh git-identity "azumag" azumag@users.noreply.github.com`（Mac のボットと同じ名義。`~/.gitconfig` は変えない）。
+
+## 2026-10-24 の修正を VM に入れる（依頼文 2 のあと）
+
+最初の install から次の 3 点を直した。VM では `git pull` のあと `install --reconfigure` で入る（設定は `.bak-*` を残して作り直し、
+opencode は新しい環境で再起動する。Slack のトークンと opencode の DB はそのまま）。
+
+- モデルを Zen の無料モデルに変えた（`glm-5.3-flash-free`、フォールバック 9 個）。opencode-go の鍵は使わない。
+- `XDG_CONFIG_HOME` を差し替えていたせいで、ボットの中の gh が `~/.config/gh` を見つけられず未ログイン扱いだった。opencode の設定は
+  `OPENCODE_CONFIG_DIR` で分けるようにした。
+- root が `HOME=/home/…` で install すると、systemd がサービスに `HOME=/root` を渡し、ブリッジが設定を見つけられなかった。
+  環境ファイルに install 時の `HOME` を書くようにした。
+
+```text
+<@U0CCCH69XMW> 修正を入れたので、次をお願いします（ブリッジはまだ起動しないでください）。
+
+1. cd ~/opencode-slack-channel && git pull --ff-only
+2. ~/opencode-slack-channel/deploy/linux/setup.sh install --reconfigure
+3. ~/opencode-slack-channel/deploy/linux/setup.sh git-identity "azumag" azumag@users.noreply.github.com
+4. rm -f ~/.opencode-slack/xdg/data/opencode/auth.json
+   （前回渡した opencode の鍵。free モデルだけにしたので不要。opencode v2 はこのファイルを読みません）
+5. ~/opencode-slack-channel/deploy/linux/setup.sh check
+6. id -un; echo $HOME
+
+check の出力と 6 の結果を返信してください。
+```
 
 ## Mac 側: 旧ボットを止める（2026-10-24 に済み）
 
@@ -114,7 +140,11 @@ done
 
 - **スレッドとセッションの対応は引き継がない。** 移す前からあるスレッドでメンションすると、VM で新しいセッションになる（スレッドの直近 30 件を文脈として渡すので、話の流れはある程度つながる）。
 - **作業場所は VM の `~/work`**（最初は空）。Mac の `~/work` のリポジトリは見えない。GitHub は VM で `gh` にログインしているアカウントで操作する。
-- **フォールバックから `desktop-9j2it17/gemma4:12b` を外した。** Mac の tailnet 内の Ollama なので VM からは届かない。チェーンは `opencode/x-preview-f-free` だけ。
+- **モデルは Zen の無料モデルだけ。** Mac は `opencode-go/deepseek-v4.1-flash`（有料）→ gemma4:12b（Mac の tailnet 内の Ollama）→
+  `x-preview-f-free` だった。VM は `glm-5.3-flash-free` → deepseek-v4.1-flash-free → mimo-v2.6-flash-free → beam-free →
+  nemotron-3.5-super-vl-free → nemotron-3-ultra-free → big-pickle → flint-40b-free → x-preview-f-free → nemotron-3.5-lightning-free
+  （10/18 に Mac で使っていた無料チェーンの順。space-bunny と longcat は一覧から消えていた。lightning は読むだけの依頼でファイルを
+  書き換えたことがあるので最後）。
 - **`secrets-hygiene.md` を VM では instructions に入れた。** Mac では `~/.config/opencode/rules/` に置いてあるだけで、opencode.json から読まれていない。GitHub に投稿するときは `~/.opencode-slack/agent-guards/gh-comment` 経由になる。
 - **Mac のグローバルプラグイン（auto-continue / loop / fiosracht-model-sync）は入れない。** ボットのセッションで動いた記録が無く、fiosracht プロバイダはもう無い。
 - **Zen 無料モデルの日次枠は IP ごと**なので、VM は Mac と別の枠になる。

@@ -6,7 +6,39 @@
   "fallbackModels": [
     {
       "providerID": "opencode",
+      "modelID": "deepseek-v4.1-flash-free"
+    },
+    {
+      "providerID": "opencode",
+      "modelID": "mimo-v2.6-flash-free"
+    },
+    {
+      "providerID": "opencode",
+      "modelID": "beam-free"
+    },
+    {
+      "providerID": "opencode",
+      "modelID": "nemotron-3.5-super-vl-free"
+    },
+    {
+      "providerID": "opencode",
+      "modelID": "nemotron-3-ultra-free"
+    },
+    {
+      "providerID": "opencode",
+      "modelID": "big-pickle"
+    },
+    {
+      "providerID": "opencode",
+      "modelID": "flint-40b-free"
+    },
+    {
+      "providerID": "opencode",
       "modelID": "x-preview-f-free"
+    },
+    {
+      "providerID": "opencode",
+      "modelID": "nemotron-3.5-lightning-free"
     }
   ]
 }
